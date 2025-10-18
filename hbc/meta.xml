@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>Wii BT tool</name>
+  <coder>Alberto Mardegan</coder>
+  <version>0.1</version>
+  <release_date>20251017000000</release_date>
+  <short_description>Bluetooth tool</short_description>
+  <long_description>View and edit the list of synchronized devices. Search for nearby devices.
+  </long_description>
+</app>
