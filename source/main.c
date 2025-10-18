@@ -53,6 +53,8 @@ static int s_title_item_index = 0;
 
 typedef struct {
     u8 bdaddr[6];
+    u8 class_major;
+    u8 class_minor;
     char name[0x40];
     bool querying_name;
     bool queried_name;
@@ -74,6 +76,38 @@ static int sprintf_bdaddr(char *dest, const u8 *bdaddr)
     return sprintf(dest, "%02x:%02x:%02x:%02x:%02x:%02x",
                    bdaddr[0], bdaddr[1], bdaddr[2], bdaddr[3], bdaddr[4],
                    bdaddr[5]);
+}
+
+static const char *describe_device(u8 major, u8 minor)
+{
+    switch (major) {
+    case 0: return "Misc";
+    case 1: return "Computer";
+    case 2: return "Phone";
+    case 3: return "LAN AP";
+    case 4: return "Audio/Video";
+    case 5:
+        switch (minor >> 4) {
+        case 0:
+            switch (minor & 0xf) {
+            case 1: return "Joystick";
+            case 2: return "Gamepad";
+            case 3: return "Remote";
+            case 4: return "Sensor";
+            case 5: return "Tablet";
+            default: return "Peripheral";
+            }
+        case 1: return "Keyboard";
+        case 2: return "Mouse";
+        case 3: return "Mouse+KB";
+        default: return "Peripheral";
+        }
+    case 6: return "Imaging";
+    case 7: return "Wearable";
+    case 8: return "Toy";
+    case 9: return "Health";
+    default: return "Unrecognized";
+    }
 }
 
 static void push_screen(ScreenId id)
@@ -245,7 +279,9 @@ static void screen_search_devices_draw()
             } else {
                 sprintf(text, "Queued for name retrieval");
             }
-            printf("% 2d) %s - %s\n", i + 1, addr_buffer, text);
+            const char *class_desc = describe_device(device->class_major,
+                                                     device->class_minor);
+            printf("% 2d) %s - (%s) %s\n", i + 1, addr_buffer, class_desc, text);
         }
     }
 
@@ -312,7 +348,10 @@ static void search_devices_cb(const BtScanResult *result, void *cb_data)
             /* Duplicate, ignoring */
             continue;
         }
-        memcpy(data->devices[num_devices++].bdaddr, bdaddr, 6);
+        memcpy(data->devices[num_devices].bdaddr, bdaddr, 6);
+        data->devices[num_devices].class_major = result->devices[i].class_major;
+        data->devices[num_devices].class_minor = result->devices[i].class_minor;
+        num_devices++;
         if (num_devices >= MAX_SEARCH_DEVICES) break;
     }
 

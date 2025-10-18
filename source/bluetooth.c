@@ -42,6 +42,8 @@ static err_t inquiry_cb(void *arg, struct hci_pcb *pcb, struct hci_inq_res *ires
 
         BtDeviceAddr *device = &s_bt_devices[scan_result.num_devices++];
         memcpy(device->bdaddr, &p->bdaddr, 6);
+        device->class_major = p->cod[1] & 0x1f;
+        device->class_minor = p->cod[0] >> 2;
     }
     if (scan_result.num_devices > 0) {
         scan_result.devices = s_bt_devices;

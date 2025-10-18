@@ -5,6 +5,8 @@
 
 typedef struct {
     u8 bdaddr[6];
+    u8 class_major;
+    u8 class_minor;
 } BtDeviceAddr;
 
 typedef struct {
