@@ -264,7 +264,10 @@ static void screen_search_devices_draw()
     if (data->search_running) {
         printf("  Searching... %c\n", anim_char);
     } else {
-        printf("Search result: %d\n\n", data->error_code);
+        if (data->error_code) {
+            printf("Error code: %d\n\n", data->error_code);
+        }
+
         for (int i = 0; i < data->num_devices; i++) {
             const DeviceEntry *device = &data->devices[i];
 
