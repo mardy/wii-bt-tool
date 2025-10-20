@@ -397,17 +397,20 @@ int main(int argc, char **argv) {
 	VIDEO_Init();
 	WPAD_Init();
 
-    PrintConsole *console = consoleInit(NULL);
-    s_screen_w = console->con_cols;
-    s_screen_h = console->con_rows;
+    static GXRModeObj *rmode;
+    static void *xfb;
 
-	// The console understands VT terminal escape codes
-	// This positions the cursor on row 2, column 0
-	// we can use variables for this with format codes too
-	// e.g. printf ("\x1b[%d;%dH", row, column );
-	printf("\x1b[2;0H");
+    rmode = VIDEO_GetPreferredMode(NULL);
+    xfb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
+    VIDEO_Configure(rmode);
+    VIDEO_SetNextFramebuffer(xfb);
+    VIDEO_SetBlack(false);
+    VIDEO_Flush();
+    VIDEO_WaitVSync();
+    if (rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
 
-	printf("Hello World!");
+    CON_InitEx(rmode, 0, 0, rmode->fbWidth,rmode->xfbHeight);
+    CON_GetMetrics(&s_screen_w, &s_screen_h);
 
 	while (!s_quit_requested) {
 		WPAD_ScanPads();
