@@ -207,6 +207,9 @@ static void screen_paired_devices_draw()
         printf(CONSOLE_ESC(37;0m) "% 2d) \x1b[%d;1m%s - \"%.64s\"\n", i + 1, color, addr_buffer, device->name);
     }
 
+    if (s_paired_devices.num_registered == 0)
+        printf("No devices registered");
+
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
     printf("_________________________________\n");
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  "
@@ -239,6 +242,9 @@ static void screen_guest_devices_draw()
         sprintf_bdaddr(addr_buffer, device->bdaddr);
         printf("% 2d) %s - \"%.64s\"\n", i + 1, addr_buffer, device->name);
     }
+
+    if (s_guest_devices.num_guests == 0)
+        printf("No guest devices registered");
 
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
     printf("_________________________________\n");
@@ -292,6 +298,9 @@ static void screen_search_devices_draw()
                                                      device->class_minor);
             printf("% 2d) %s - (%s) %s\n", i + 1, addr_buffer, class_desc, text);
         }
+
+        if (data->num_devices == 0)
+            printf("No devices found");
     }
 
     const char *search_type = (data->lap == BT_LAP_GIAC) ? "General" : "Limited";
