@@ -3,9 +3,6 @@
 #include <gccore.h>
 #include "hci.h"
 
-#define LAP_GIAC 0x009E8B33
-#define LAP_LIAC 0x009E8B00
-
 #define MAX_SCAN_RESULTS 10
 
 typedef struct {
@@ -55,7 +52,7 @@ static err_t inquiry_cb(void *arg, struct hci_pcb *pcb, struct hci_inq_res *ires
     return HCI_SUCCESS;
 }
 
-void bt_scan(BtScanCb callback, void *cb_data)
+void bt_scan(u32 lap, BtScanCb callback, void *cb_data)
 {
     u32 level;
     int max_cnt = MAX_SCAN_RESULTS;
@@ -65,7 +62,7 @@ void bt_scan(BtScanCb callback, void *cb_data)
 
     _CPU_ISR_Disable(level);
     hci_arg(&s_scan_data);
-    hci_inquiry(LAP_GIAC, 0x03, max_cnt, inquiry_cb);
+    hci_inquiry(lap, 0x03, max_cnt, inquiry_cb);
     _CPU_ISR_Restore(level);
 
 }

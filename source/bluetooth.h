@@ -3,6 +3,9 @@
 
 #include <gccore.h>
 
+#define BT_LAP_GIAC 0x009E8B33
+#define BT_LAP_LIAC 0x009E8B00
+
 typedef struct {
     u8 bdaddr[6];
     u8 class_major;
@@ -17,7 +20,7 @@ typedef struct {
 } BtScanResult;
 
 typedef void (*BtScanCb)(const BtScanResult *result, void *cb_data);
-void bt_scan(BtScanCb callback, void *cb_data);
+void bt_scan(u32 lap, BtScanCb callback, void *cb_data);
 
 typedef struct {
     int error_code;
