@@ -32,6 +32,7 @@ static conf_pads s_paired_devices;
 static conf_pad_guests s_guest_devices;
 
 typedef struct {
+    void (*reset)(void);
     void (*draw)(void);
     void (*process_input)(u32 buttons);
 } ScreenMethods;
@@ -76,6 +77,7 @@ static SearchDeviceData s_search_device_data = {
 };
 
 static void retrive_device_names(SearchDeviceData *data);
+static const ScreenMethods *current_screen();
 
 static int sprintf_bdaddr(char *dest, const u8 *bdaddr)
 {
@@ -127,9 +129,12 @@ static void push_screen(ScreenId id)
 {
     consoleClear();
     s_screen_stack[++s_screen_index] = id;
+
+    const ScreenMethods *screen = current_screen();
+    if (screen->reset) screen->reset();
 }
 
-static ScreenId current_screen(void)
+static ScreenId current_screen_id(void)
 {
     return s_screen_stack[s_screen_index];
 }
@@ -256,6 +261,13 @@ void screen_guest_devices_process_input(u32 buttons)
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
     }
+}
+
+static void screen_search_devices_reset()
+{
+    SearchDeviceData *data = &s_search_device_data;
+    memset(data, 0, sizeof(*data));
+    data->lap = BT_LAP_GIAC;
 }
 
 static void screen_search_devices_draw()
@@ -397,22 +409,31 @@ static void screen_search_devices_process_input(u32 buttons)
 
 static const ScreenMethods s_screens[SCREEN_LAST] = {
     [SCREEN_TITLE] = {
+        NULL,
         screen_title_draw,
         screen_title_process_input,
     },
     [SCREEN_PAIRED_DEVICES] = {
+        NULL,
         screen_paired_devices_draw,
         screen_paired_devices_process_input,
     },
     [SCREEN_GUEST_DEVICES] = {
+        NULL,
         screen_guest_devices_draw,
         screen_guest_devices_process_input,
     },
     [SCREEN_SEARCH_DEVICES] = {
+        screen_search_devices_reset,
         screen_search_devices_draw,
         screen_search_devices_process_input,
     },
 };
+
+static const ScreenMethods *current_screen()
+{
+    return &s_screens[current_screen_id()];
+}
 
 int main(int argc, char **argv) {
 
@@ -440,7 +461,7 @@ int main(int argc, char **argv) {
 		if (pressed & WPAD_BUTTON_HOME)
             s_quit_requested = true;
 
-        const ScreenMethods *screen = &s_screens[current_screen()];
+        const ScreenMethods *screen = current_screen();
         screen->draw();
         if (screen->process_input) screen->process_input(pressed);
 
