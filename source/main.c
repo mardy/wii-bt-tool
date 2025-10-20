@@ -84,6 +84,13 @@ static int sprintf_bdaddr(char *dest, const u8 *bdaddr)
                    bdaddr[5]);
 }
 
+static void color_selected(bool selected)
+{
+    printf("\x1b[%d;%dm",
+           selected ?  (40 + CONSOLE_COLOR_BLUE) : (40 + CONSOLE_COLOR_BLACK),
+           selected);
+}
+
 static const char *describe_device(u8 major, u8 minor)
 {
     switch (major) {
@@ -154,15 +161,8 @@ static void screen_title_draw()
     for (int i = 0; i < TITLE_NUM_SCREENS; i++) {
         const ActionItem *item = &s_title_screen_items[i];
 
-        int bold, bgcolor;
-        if (i == s_title_item_index) {
-            bold = 1;
-            bgcolor = CONSOLE_COLOR_BLUE;
-        } else {
-            bold = 0;
-            bgcolor = CONSOLE_COLOR_BLACK;
-        }
-        printf("\x1b[%d;%dm%s\n", bgcolor + 40, bold, item->label);
+        color_selected(i == s_title_item_index);
+        printf("%s\n", item->label);
     }
 
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
