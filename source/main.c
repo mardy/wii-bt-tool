@@ -359,6 +359,7 @@ static void search_devices_cb(const BtScanResult *result, void *cb_data)
             /* Duplicate, ignoring */
             continue;
         }
+        memset(&data->devices[num_devices], 0, sizeof(data->devices[num_devices]));
         memcpy(data->devices[num_devices].bdaddr, bdaddr, 6);
         data->devices[num_devices].class_major = result->devices[i].class_major;
         data->devices[num_devices].class_minor = result->devices[i].class_minor;
