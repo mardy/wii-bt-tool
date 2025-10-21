@@ -17,6 +17,8 @@ typedef enum {
     SCREEN_PAIRED_DEVICES,
     SCREEN_GUEST_DEVICES,
     SCREEN_SEARCH_DEVICES,
+    SCREEN_DEVICE,
+    SCREEN_CONNECT,
     SCREEN_LAST,
 } ScreenId;
 
@@ -76,6 +78,28 @@ static SearchDeviceData s_search_device_data = {
     0,
     0,
 };
+
+typedef enum {
+    CONN_STATUS_DISCONNECTED = 0,
+    CONN_STATUS_CONNECTING,
+    CONN_STATUS_CONNECTED,
+} ConnectionStatus;
+
+typedef struct {
+    DeviceEntry device;
+    int item_index;
+    ConnectionStatus conn_status;
+    int error_code;
+    int l2cap_status;
+} DeviceData;
+
+static DeviceData s_device_data;
+
+static const ActionItem s_device_actions[] = {
+    { SCREEN_CONNECT, "Connect", },
+};
+#define DEVICE_NUM_ACTIONS \
+    (sizeof(s_device_actions) / sizeof(s_device_actions[0]))
 
 static void retrive_device_names(SearchDeviceData *data);
 static const ScreenMethods *current_screen();
@@ -144,6 +168,13 @@ static void pop_screen()
 {
     consoleClear();
     if (s_screen_index > 0) s_screen_index--;
+}
+
+static char get_anim_char()
+{
+    static const char wait_seq[] = "\\|/-";
+    static int last_char = 0;
+    return wait_seq[last_char++ % 4];
 }
 
 static bool is_active(const u8 *bdaddr) {
@@ -283,9 +314,7 @@ static void screen_search_devices_draw()
     const SearchDeviceData *data = &s_search_device_data;
     const char *search_type = (data->lap == BT_LAP_GIAC) ? "General" : "Limited";
 
-    static const char wait_seq[] = "\\|/-";
-    static int last_char = 0;
-    char anim_char = wait_seq[last_char++ % 4];
+    char anim_char = get_anim_char();
 
     if (data->search_running) {
         printf("  Searching... %c\n", anim_char);
@@ -407,9 +436,12 @@ static void screen_search_devices_process_input(u32 buttons)
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
     } else if (buttons & WPAD_BUTTON_2) {
-        s_search_device_data.search_running = true;
-        bt_scan(s_search_device_data.lap,
-                search_devices_cb, &s_search_device_data);
+        if (data->item_index == 0) {
+            data->search_running = true;
+            bt_scan(data->lap, search_devices_cb, data);
+        } else {
+            push_screen(SCREEN_DEVICE);
+        }
     } else if (buttons & WPAD_BUTTON_A) {
         data->lap = (data->lap == BT_LAP_GIAC) ?
             BT_LAP_LIAC : BT_LAP_GIAC;
@@ -419,6 +451,118 @@ static void screen_search_devices_process_input(u32 buttons)
     } else if (buttons & WPAD_BUTTON_RIGHT) {
         if (data->item_index > 0)
             data->item_index--;
+    }
+}
+
+static void screen_device_reset()
+{
+    DeviceData *data = &s_device_data;
+    memset(data, 0, sizeof(*data));
+
+    const SearchDeviceData *search_data = &s_search_device_data;
+
+    memcpy(&data->device, &search_data->devices[search_data->item_index - 1],
+           sizeof(data->device));
+}
+
+static void screen_device_draw()
+{
+    const DeviceData *data = &s_device_data;
+
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    char bdaddr[20];
+    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    printf("DEVICE %s - %.64s", bdaddr, data->device.name);
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    for (int i = 0; i < DEVICE_NUM_ACTIONS; i++) {
+        const ActionItem *item = &s_device_actions[i];
+
+        color_selected(i == data->item_index);
+        printf("%s\n", item->label);
+    }
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_device_process_input(u32 buttons)
+{
+    DeviceData *data = &s_device_data;
+
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
+    } else if (buttons & WPAD_BUTTON_2) {
+        ActionId action_id = s_device_actions[data->item_index].action_id;
+        if (action_id < ACTION_FIRST) {
+            push_screen(action_id);
+        }
+    } else if (buttons & WPAD_BUTTON_LEFT) {
+        if (data->item_index < DEVICE_NUM_ACTIONS)
+            data->item_index++;
+    } else if (buttons & WPAD_BUTTON_RIGHT) {
+        if (data->item_index > 0)
+            data->item_index--;
+    }
+}
+
+static void connect_cb(const BtConnectResult *result, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    if (result->error_code == 0) {
+        data->conn_status = CONN_STATUS_CONNECTED;
+    } else {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+    }
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
+}
+
+static void screen_connect_reset()
+{
+    DeviceData *data = &s_device_data;
+
+    data->error_code = 0;
+    data->l2cap_status = 0;
+    data->conn_status = CONN_STATUS_CONNECTING;
+    bt_connect(data->device.bdaddr, true, connect_cb, data);
+}
+
+static void screen_connect_draw()
+{
+    const DeviceData *data = &s_device_data;
+
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    char bdaddr[20];
+    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    printf("CONNECTION TO %s - %.64s", bdaddr, data->device.name);
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    char anim_char = get_anim_char();
+
+    if (data->conn_status == CONN_STATUS_CONNECTING) {
+        printf("Connecting... %c\n", anim_char);
+    } else {
+        printf("%s      \n", data->conn_status == CONN_STATUS_CONNECTED ?
+               "Connected" : "Disconnected");
+        printf("Error code = %d, status = %d", data->error_code, data->l2cap_status);
+    }
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_connect_process_input(u32 buttons)
+{
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
     }
 }
 
@@ -442,6 +586,16 @@ static const ScreenMethods s_screens[SCREEN_LAST] = {
         screen_search_devices_reset,
         screen_search_devices_draw,
         screen_search_devices_process_input,
+    },
+    [SCREEN_DEVICE] = {
+        screen_device_reset,
+        screen_device_draw,
+        screen_device_process_input,
+    },
+    [SCREEN_CONNECT] = {
+        screen_connect_reset,
+        screen_connect_draw,
+        screen_connect_process_input,
     },
 };
 

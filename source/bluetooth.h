@@ -30,4 +30,13 @@ typedef struct {
 typedef void (*BtReadRemoteNameCb)(const BtReadRemoteNameResult *result, void *cb_data);
 void bt_read_remote_name(const u8 *device_addr, BtReadRemoteNameCb callback, void *cb_data);
 
+typedef struct {
+    int error_code;
+    int status;
+} BtConnectResult;
+
+typedef void (*BtConnectCb)(const BtConnectResult *result, void *cb_data);
+void bt_connect(const u8 *device_addr, bool allow_role_switch,
+                BtConnectCb callback, void *cb_data);
+
 #endif // BTT_BLUETOOTH_H
