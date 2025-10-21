@@ -62,6 +62,7 @@ typedef struct {
 } DeviceEntry;
 
 typedef struct {
+    int item_index;
     u32 lap;
     bool search_running;
     int error_code;
@@ -280,6 +281,7 @@ static void screen_search_devices_draw()
     printf("\x1b[4;0H");
 
     const SearchDeviceData *data = &s_search_device_data;
+    const char *search_type = (data->lap == BT_LAP_GIAC) ? "General" : "Limited";
 
     static const char wait_seq[] = "\\|/-";
     static int last_char = 0;
@@ -292,6 +294,9 @@ static void screen_search_devices_draw()
             printf("Error code: %d\n\n", data->error_code);
         }
 
+        color_selected(data->item_index == 0);
+        printf("Search again (%s)\n\n", search_type);
+
         for (int i = 0; i < data->num_devices; i++) {
             const DeviceEntry *device = &data->devices[i];
 
@@ -300,7 +305,7 @@ static void screen_search_devices_draw()
 
             char text[100];
             if (device->queried_name) {
-                sprintf(text, CONSOLE_WHITE "%.64s" CONSOLE_RESET, device->name);
+                sprintf(text, CONSOLE_ESC(1m) "%.64s" CONSOLE_RESET, device->name);
             } else if (device->querying_name) {
                 sprintf(text, "Retrieving name... %c", anim_char);
             } else {
@@ -308,18 +313,21 @@ static void screen_search_devices_draw()
             }
             const char *class_desc = describe_device(device->class_major,
                                                      device->class_minor);
+            color_selected(data->item_index == i + 1);
             printf("% 2d) %s - (%s) %s\n", i + 1, addr_buffer, class_desc, text);
         }
 
+        color_selected(false);
         if (data->num_devices == 0)
             printf("No devices found");
     }
 
-    const char *search_type = (data->lap == BT_LAP_GIAC) ? "General" : "Limited";
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
     printf("_________________________________\n");
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
-    printf(CONSOLE_WHITE "2 - " CONSOLE_RESET "Search (%s)\n", search_type);
+    const char *action_text = (data->item_index == 0) ?
+        "Run search" : "Enter device page";
+    printf(CONSOLE_WHITE "2 - " CONSOLE_RESET "%s\n", action_text);
     printf(CONSOLE_WHITE "A - " CONSOLE_RESET "Switch search type");
 }
 
@@ -395,6 +403,7 @@ static void search_devices_cb(const BtScanResult *result, void *cb_data)
 
 static void screen_search_devices_process_input(u32 buttons)
 {
+    SearchDeviceData *data = &s_search_device_data;
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
     } else if (buttons & WPAD_BUTTON_2) {
@@ -402,8 +411,14 @@ static void screen_search_devices_process_input(u32 buttons)
         bt_scan(s_search_device_data.lap,
                 search_devices_cb, &s_search_device_data);
     } else if (buttons & WPAD_BUTTON_A) {
-        s_search_device_data.lap = (s_search_device_data.lap == BT_LAP_GIAC) ?
+        data->lap = (data->lap == BT_LAP_GIAC) ?
             BT_LAP_LIAC : BT_LAP_GIAC;
+    } else if (buttons & WPAD_BUTTON_LEFT) {
+        if (data->item_index < data->num_devices)
+            data->item_index++;
+    } else if (buttons & WPAD_BUTTON_RIGHT) {
+        if (data->item_index > 0)
+            data->item_index--;
     }
 }
 
