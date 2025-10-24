@@ -19,6 +19,7 @@ typedef enum {
     SCREEN_SEARCH_DEVICES,
     SCREEN_DEVICE,
     SCREEN_CONNECT,
+    SCREEN_SDP,
     SCREEN_LAST,
 } ScreenId;
 
@@ -37,6 +38,7 @@ typedef struct {
     void (*reset)(void);
     void (*draw)(void);
     void (*process_input)(u32 buttons);
+    void (*pop)(void);
 } ScreenMethods;
 
 typedef struct {
@@ -91,12 +93,17 @@ typedef struct {
     ConnectionStatus conn_status;
     int error_code;
     int l2cap_status;
+    BtL2capHandle *sdp_handle;
+    bool sdp_got_response;
+    char sdp_response[256];
+    int sdp_response_len;
 } DeviceData;
 
 static DeviceData s_device_data;
 
 static const ActionItem s_device_actions[] = {
     { SCREEN_CONNECT, "Connect", },
+    { SCREEN_SDP, "Read SDP data", },
 };
 #define DEVICE_NUM_ACTIONS \
     (sizeof(s_device_actions) / sizeof(s_device_actions[0]))
@@ -567,6 +574,138 @@ static void screen_connect_process_input(u32 buttons)
     }
 }
 
+static void sdp_got_message(BtL2capHandle *handle, void *msg, size_t len,
+                            void *cb_data)
+{
+    DeviceData *data = cb_data;
+    data->sdp_got_response = true;
+    if (len > sizeof(data->sdp_response)) {
+        len = sizeof(data->sdp_response);
+    }
+    memcpy(data->sdp_response, msg, len);
+    data->sdp_response_len = len;
+}
+
+static void sdp_connect_cb(const BtConnectResult *result, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    if (result->error_code == 0) {
+        data->conn_status = CONN_STATUS_CONNECTED;
+    } else {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+    }
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
+    BtL2capHandle *handle = data->sdp_handle = result->handle;
+
+    bt_l2cap_handle_notify(handle, sdp_got_message, data);
+
+    /* This needs checking */
+    char msg[] = {
+        0x06, /* SDP_SERVICE_SEARCH_ATTRIBUTE_REQUEST_PDU */
+        0x00, 0x00, /* Transaction ID */
+        0x00, 0x10, /* Parameter length */
+        0x35, /* DataElementSequence */
+        0x03, /* Element size */
+        0x19, /* Uuid16 */
+        0x10, 0x02, /* BLUETOOTH_ATTRIBUTE_PUBLIC_BROWSE_ROOT */
+        0x20, 0x20, /* Max attribute count */
+        /* AttributeIdList */
+        0x35, /* DataElementSequence */
+        0x06, /* Data size */
+        0x09, /* unsigned, 2 bytes */
+        0x00, 0x00, /* ServiceName */
+        0x09, /* unsigned, 2 bytes */
+        0x00, 0x01, /* ServiceDescription */
+        0x00, /* Continuation state */
+    };
+    bt_l2cap_handle_write(handle, msg, sizeof(msg));
+}
+
+static void screen_sdp_reset()
+{
+    DeviceData *data = &s_device_data;
+
+    data->error_code = 0;
+    data->l2cap_status = 0;
+    data->conn_status = CONN_STATUS_CONNECTING;
+    data->sdp_got_response = false;
+    data->sdp_response_len = 0;
+    bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
+               sdp_connect_cb, data);
+}
+
+static void screen_sdp_pop()
+{
+    DeviceData *data = &s_device_data;
+
+    if (data->sdp_handle) {
+        bt_l2cap_handle_close(data->sdp_handle);
+        data->sdp_handle = NULL;
+    }
+}
+
+static void print_row_data(char *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        printf("%02x ", data[i]);
+    }
+
+    /* Print the same as a string */
+    printf(" %.*s\n", len, data);
+}
+
+static void screen_sdp_draw()
+{
+    const DeviceData *data = &s_device_data;
+
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    char bdaddr[20];
+    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    printf("SDP TO %s - %.64s", bdaddr, data->device.name);
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    char anim_char = get_anim_char();
+
+    if (data->conn_status == CONN_STATUS_CONNECTING) {
+        printf("Connecting... %c\n", anim_char);
+    } else {
+        printf("%s      \n", data->conn_status == CONN_STATUS_CONNECTED ?
+               "Connected" : "Disconnected");
+        printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
+    }
+
+    if (data->sdp_got_response) {
+        printf("Got response, size = %d\n", data->sdp_response_len);
+        int written = 0;
+        for (int i = 0; i < 20 && written < data->sdp_response_len; i++) {
+            char input[16];
+            memset(input, 0, sizeof(input));
+            int row_len = data->sdp_response_len - written;
+            if (row_len > sizeof(input)) {
+                row_len = sizeof(input);
+            }
+            memcpy(input, data->sdp_response + written, row_len);
+            print_row_data(input, sizeof(input));
+            written += row_len;
+        }
+    }
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_sdp_process_input(u32 buttons)
+{
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
+    }
+}
+
 static const ScreenMethods s_screens[SCREEN_LAST] = {
     [SCREEN_TITLE] = {
         NULL,
@@ -597,6 +736,12 @@ static const ScreenMethods s_screens[SCREEN_LAST] = {
         screen_connect_reset,
         screen_connect_draw,
         screen_connect_process_input,
+    },
+    [SCREEN_SDP] = {
+        screen_sdp_reset,
+        screen_sdp_draw,
+        screen_sdp_process_input,
+        screen_sdp_pop,
     },
 };
 
