@@ -20,6 +20,7 @@ typedef enum {
     SCREEN_DEVICE,
     SCREEN_CONNECT,
     SCREEN_SDP,
+    SCREEN_HID,
     SCREEN_LAST,
 } ScreenId;
 
@@ -104,6 +105,7 @@ static DeviceData s_device_data;
 static const ActionItem s_device_actions[] = {
     { SCREEN_CONNECT, "Connect", },
     { SCREEN_SDP, "Read SDP data", },
+    { SCREEN_HID, "Run HID test", },
 };
 #define DEVICE_NUM_ACTIONS \
     (sizeof(s_device_actions) / sizeof(s_device_actions[0]))
@@ -706,6 +708,81 @@ static void screen_sdp_process_input(u32 buttons)
     }
 }
 
+static void hid_connect_intr_cb(const BtConnectResult *result, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
+    if (result->error_code != 0) {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+        return;
+    }
+
+    data->conn_status = CONN_STATUS_CONNECTED;
+    /* TODO: get some info */
+}
+
+static void hid_connect_ctrl_cb(const BtConnectResult *result, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
+    if (result->error_code != 0) {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+        return;
+    }
+
+    bt_connect(data->device.bdaddr, true, BT_PSM_HID_INTR,
+               hid_connect_intr_cb, data);
+}
+
+static void screen_hid_reset()
+{
+    DeviceData *data = &s_device_data;
+
+    data->error_code = 0;
+    data->l2cap_status = 0;
+    data->conn_status = CONN_STATUS_CONNECTING;
+    bt_connect(data->device.bdaddr, true, BT_PSM_HID_CONTROL,
+               hid_connect_ctrl_cb, data);
+}
+
+static void screen_hid_draw()
+{
+    const DeviceData *data = &s_device_data;
+
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    char bdaddr[20];
+    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    printf("HID for %s - %.64s", bdaddr, data->device.name);
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    char anim_char = get_anim_char();
+
+    if (data->conn_status == CONN_STATUS_CONNECTING) {
+        printf("Connecting... %c\n", anim_char);
+    } else {
+        printf("%s      \n", data->conn_status == CONN_STATUS_CONNECTED ?
+               "Connecting" : "Connected");
+        printf("Error code = %d, status = %d", data->error_code, data->l2cap_status);
+    }
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_hid_process_input(u32 buttons)
+{
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
+    }
+}
+
 static const ScreenMethods s_screens[SCREEN_LAST] = {
     [SCREEN_TITLE] = {
         NULL,
@@ -742,6 +819,11 @@ static const ScreenMethods s_screens[SCREEN_LAST] = {
         screen_sdp_draw,
         screen_sdp_process_input,
         screen_sdp_pop,
+    },
+    [SCREEN_HID] = {
+        screen_hid_reset,
+        screen_hid_draw,
+        screen_hid_process_input,
     },
 };
 
