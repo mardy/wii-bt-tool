@@ -3,9 +3,15 @@
 #include <gccore.h>
 #include "hci.h"
 #include "l2cap.h"
+#include "btpbuf.h"
 
-#define HIDP_CONTROL_CHANNEL 0x11
 #define MAX_SCAN_RESULTS 10
+
+struct _bt_l2cap_handle {
+    struct l2cap_pcb *pcb;
+    BtL2capNotify notify_cb;
+    void *notify_cb_data;
+};
 
 typedef struct {
     BtScanCb callback;
@@ -109,20 +115,75 @@ void bt_read_remote_name(const u8 *device_addr,
     _CPU_ISR_Restore(level);
 }
 
+static BtL2capHandle *bt_l2cap_handle_new(struct l2cap_pcb *pcb)
+{
+    BtL2capHandle *handle = malloc(sizeof(BtL2capHandle));
+    memset(handle, 0, sizeof(*handle));
+    handle->pcb = pcb;
+    return handle;
+}
+
+void bt_l2cap_handle_notify(BtL2capHandle *handle,
+                            BtL2capNotify callback, void *cb_data)
+{
+    handle->notify_cb = callback;
+    handle->notify_cb_data = cb_data;
+}
+
+int bt_l2cap_handle_write(BtL2capHandle *handle, const void *data, size_t len)
+{
+    if (!handle || !handle->pcb) return -1;
+
+    struct pbuf *p = btpbuf_alloc(PBUF_RAW, len, PBUF_RAM);
+    if (!p) return -2;
+
+    memcpy(p->payload, data, len);
+    err_t err = l2ca_datawrite(handle->pcb, p);
+    btpbuf_free(p);
+
+    return err;
+}
+
+void bt_l2cap_handle_close(BtL2capHandle *handle)
+{
+    if (!handle) return;
+    if (handle->pcb) {
+        l2cap_close(handle->pcb);
+    }
+    free(handle);
+}
+
+static err_t process_input(void *arg, struct l2cap_pcb *pcb, struct pbuf *p, err_t err)
+{
+    BtL2capHandle *handle = arg;
+    if (!handle->notify_cb) return ERR_OK;
+
+    handle->notify_cb(handle, p->payload, p->tot_len, handle->notify_cb_data);
+    return ERR_OK;
+}
+
 static err_t connect_cb(void *arg, struct l2cap_pcb *lpcb,
                         u16_t result, u16_t status)
 {
     ConnectData *data = arg;
 
-    BtConnectResult r = { result, status };
+    BtConnectResult r = {
+        result,
+        status,
+        bt_l2cap_handle_new(lpcb),
+    };
+    if (result == L2CAP_CONN_SUCCESS) {
+        l2cap_arg(lpcb, r.handle);
+        l2cap_recv(lpcb, process_input);
+    }
     data->callback(&r, data->cb_data);
-    l2cap_close(lpcb);
     data->pcb = NULL;
     return ERR_OK;
 }
 
 void bt_connect(const u8 *device_addr,
                 bool allow_role_switch,
+                u16 psm,
                 BtConnectCb callback, void *cb_data)
 {
     u32 level;
@@ -139,7 +200,7 @@ void bt_connect(const u8 *device_addr,
     _CPU_ISR_Disable(level);
     l2ca_connect_req(s_connect_data.pcb,
                      (struct bd_addr *)device_addr,
-                     HIDP_CONTROL_CHANNEL,
+                     psm,
                      allow_role_switch ? HCI_ALLOW_ROLE_SWITCH : 0,
                      connect_cb);
     _CPU_ISR_Restore(level);

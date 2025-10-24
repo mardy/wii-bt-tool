@@ -529,7 +529,8 @@ static void screen_connect_reset()
     data->error_code = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
-    bt_connect(data->device.bdaddr, true, connect_cb, data);
+    bt_connect(data->device.bdaddr, true, BT_PSM_HID_CONTROL,
+               connect_cb, data);
 }
 
 static void screen_connect_draw()
