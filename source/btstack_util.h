@@ -48,12 +48,21 @@
 extern "C" {
 #endif
 
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
 
-#include "bluetooth.h"
-#include "btstack_defines.h"
-#include "btstack_linked_list.h"
+#define btstack_assert assert
+
+#define UNUSED(x) (void)(x)
+
+#define BD_ADDR_LEN 6
+
+/**
+ * @brief Bluetooth address
+ */
+typedef uint8_t bd_addr_t[BD_ADDR_LEN];
+
 	
 // hack: compilation with the android ndk causes an error as there's a reverse_64 macro
 #ifdef reverse_64

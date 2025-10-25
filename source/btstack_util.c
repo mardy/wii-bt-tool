@@ -46,12 +46,11 @@
 #include <intrin.h>
 #endif
 
-#include "btstack_config.h"
-#include "btstack_debug.h"
 #include "btstack_util.h"
 
 #include <stdio.h>  // vsnprintf
 #include <string.h> // memcpy
+#include <stdarg.h>
 
 
 
@@ -317,24 +316,6 @@ void log_info_hexdump(const void * data, int size){
 #else
     UNUSED(data);   // ok: no code
     UNUSED(size);   // ok: no code
-#endif
-}
-
-void log_info_key(const char * name, sm_key_t key){
-#ifdef ENABLE_LOG_INFO
-    char buffer[16*2+1];
-    int i;
-    int j = 0;
-    for (i=0; i<16;i++){
-        uint8_t byte = key[i];
-        buffer[j++] = char_for_high_nibble(byte);
-        buffer[j++] = char_for_low_nibble(byte);
-    }
-    buffer[j] = 0;
-    log_info("%-6s %s", name, buffer);
-#else
-    UNUSED(name);
-    (void)key;
 #endif
 }
 

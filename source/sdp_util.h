@@ -43,8 +43,7 @@
 #ifndef SDP_UTIL_H
 #define SDP_UTIL_H
 
-#include "btstack_bool.h"
-
+#include <stdbool.h>
 #include <stdint.h>
 
 #if defined __cplusplus

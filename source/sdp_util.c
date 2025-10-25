@@ -37,17 +37,17 @@
 
 #define BTSTACK_FILE__ "sdp_util.c"
 
+#define ENABLE_SDP_DES_DUMP
+
 /*
  *  sdp_util.c
  */
 
-#include "bluetooth.h"
-#include "btstack_config.h"
-#include "btstack_debug.h"
+#include "sdp_util.h"
+
 #include "btstack_util.h"
-#include "classic/core.h"
-#include "classic/sdp_util.h"
- 
+
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
