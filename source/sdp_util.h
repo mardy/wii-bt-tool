@@ -94,7 +94,7 @@ typedef enum {
 } de_size_t;
 
 // MARK: DateElement
-void      de_dump_data_element(const uint8_t * record);
+void      de_dump_data_element(const uint8_t * record, int from_row, int max_rows);
 uint32_t  de_get_len(const uint8_t * header);
 
 

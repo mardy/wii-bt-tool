@@ -73,6 +73,10 @@ static uint8_t des_service_search_pattern_uuid128[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+static int s_dump_from_row = 0;
+static int s_dump_row = 0;
+static int s_dump_max_rows = 20;
+
 // MARK: DataElement getter
 de_size_t de_get_size_type(const uint8_t *header){
     return (de_size_t) (header[0] & 7);
@@ -716,19 +720,26 @@ bool sdp_record_matches_service_search_pattern(uint8_t *record, uint8_t *service
 // MARK: Dump DataElement
 // context { indent }
 #ifdef ENABLE_SDP_DES_DUMP
+
+static inline bool vis() {
+    return s_dump_row >= s_dump_from_row &&
+        s_dump_row < (s_dump_from_row + s_dump_max_rows);
+}
+
 static int de_traversal_dump_data(uint8_t * element, de_type_t de_type, de_size_t de_size, void *my_context){
     unsigned int indent = *(int*) my_context;
     unsigned int i;
-    for (i=0; i<indent;i++) printf("    ");
+    if (vis()) for (i=0; i<indent;i++) printf("    ");
     unsigned int pos     = de_get_header_size(element);
     unsigned int end_pos = de_get_len(element);
-    printf("type %5s (%u), element len %2u ", type_names[de_type], de_type, end_pos);
+    if (vis()) printf("type %5s (%u), element len %2u ", type_names[de_type], de_type, end_pos);
     if (de_type == DE_DES) {
-		printf("\n");
+		if (vis()) printf("\n");
+        s_dump_row++;
         indent++;
         de_traverse_sequence(element, de_traversal_dump_data, (void *)&indent);
     } else if (de_type == DE_UUID && de_size == DE_SIZE_128) {
-        printf(", value: %s\n", uuid128_to_str(element+1));
+        if(vis()) printf(", value: %s\n", uuid128_to_str(element+1));
     } else if (de_type == DE_STRING) {
         unsigned int len = 0;
         switch (de_size){
@@ -741,12 +752,15 @@ static int de_traversal_dump_data(uint8_t * element, de_type_t de_type, de_size_
             default:
                 break;
         }
-        printf(", len %2u, value: '", len);
-        for (i=0;i<len;i++){
-            uint8_t c = element[pos + i];
-            printf("%c", (c >= 0x20 && c <= 0x7f) ? c : '.');
+        if (vis()) {
+            printf(", len %2u, value: '", len);
+            for (i=0;i<len;i++){
+                uint8_t c = element[pos + i];
+                printf("%c", (c >= 0x20 && c <= 0x7f) ? c : '.');
+            }
+            printf("'\n");
         }
-        printf("'\n");
+        s_dump_row++;
     } else {
         uint32_t value = 0;
         switch (de_size) {
@@ -764,15 +778,19 @@ static int de_traversal_dump_data(uint8_t * element, de_type_t de_type, de_size_
             default:
                 break;
         }
-        printf(", value: 0x%08" PRIx32 "\n", value);
+        if (vis()) printf(", value: 0x%08" PRIx32 "\n", value);
+        s_dump_row++;
     }
     return 0;
 }
 #endif
 
-void de_dump_data_element(const uint8_t * record){
+void de_dump_data_element(const uint8_t * record, int from_row, int max_rows){
 #ifdef ENABLE_SDP_DES_DUMP
     unsigned int indent = 0;
+    s_dump_row = 0;
+    s_dump_from_row = from_row;
+    s_dump_max_rows = max_rows;
     // hack to get root DES, too.
     de_type_t type = de_get_element_type(record);
     de_size_t size = de_get_size_type(record);

@@ -1,4 +1,7 @@
 #include "bluetooth.h"
+#include "bluetooth_sdp.h"
+#include "btstack_util.h"
+#include "sdp_util.h"
 
 #include <gccore.h>
 #include <stdbool.h>
@@ -20,6 +23,7 @@ typedef enum {
     SCREEN_DEVICE,
     SCREEN_CONNECT,
     SCREEN_SDP,
+    SCREEN_SDP_HID,
     SCREEN_HID,
     SCREEN_LAST,
 } ScreenId;
@@ -89,25 +93,36 @@ typedef enum {
     CONN_STATUS_DISCONNECTED = 0,
     CONN_STATUS_CONNECTING,
     CONN_STATUS_CONNECTED,
+    CONN_STATUS_SDP_HID_SERVICE,
+    CONN_STATUS_SDP_HID_ATTRIBUTES,
+    CONN_STATUS_NULL_RESPONSE,
 } ConnectionStatus;
 
 typedef struct {
     DeviceEntry device;
     int item_index;
+    int current_row;
     ConnectionStatus conn_status;
     int error_code;
     int l2cap_status;
     BtL2capHandle *sdp_handle;
-    bool sdp_got_response;
-    char sdp_response[256];
+    bool has_pending_call;
+    int sdp_num_responses;
+    uint8_t sdp_response[4096];
+    uint16_t sdp_num_services;
+    uint32_t sdp_hid_service_id;
     int sdp_response_len;
 } DeviceData;
 
 static DeviceData s_device_data;
+static uint16_t s_sdp_transaction_id = 0;
+static uint8_t s_sdp_continuation_len = 0;
+static uint8_t s_sdp_continuation_code[16];
 
 static const ActionItem s_device_actions[] = {
     { SCREEN_CONNECT, "Connect", },
     { SCREEN_SDP, "Read SDP data", },
+    { SCREEN_SDP_HID, "Read SDP HID data", },
     { SCREEN_HID, "Run HID test", },
 };
 #define DEVICE_NUM_ACTIONS \
@@ -619,13 +634,156 @@ static void screen_connect_process_input(u32 buttons)
     }
 }
 
+static inline bool copy_response(const uint8_t *response, int size,
+                                 uint8_t *dest, int *dest_len, int dest_max_len)
+{
+    int available = dest_max_len - *dest_len;
+    bool did_fit = true;
+    if (size > available) {
+        size = available;
+        did_fit = false;
+    }
+    memcpy(dest + *dest_len, response, size);
+    *dest_len += size;
+    return did_fit;
+}
+
+/* Returns true if the response needs completion */
+static bool sdp_save_service_attribute(const uint8_t *response, int size,
+                                       uint8_t *dest, int *dest_len, int dest_max_len)
+{
+    int offset = 3; /* command ID + transaction ID */
+
+    if (offset + 2 + 2 > size) return false;  // parameterLength, attributeListByteCount
+
+    uint16_t parameter_length = big_endian_read_16(response, offset);
+    offset += 2;
+    if (offset + parameter_length > size) return false;
+
+    uint16_t attribute_list_size = big_endian_read_16(response, offset);
+    offset += 2;
+    if (!copy_response(response + offset, attribute_list_size,
+                       dest, dest_len, dest_max_len)) return false;
+    offset += attribute_list_size;
+    if (offset + 1 > size) return false; /* 1 byte for continuation state */
+
+    uint8_t continuation_len = response[offset++];
+    if (continuation_len == 0 ||
+        continuation_len > 16 ||
+        offset + continuation_len > size) return false;
+
+    memcpy(s_sdp_continuation_code, response + offset, continuation_len);
+    s_sdp_continuation_len = continuation_len;
+    return true;
+}
+
+static int sdp_build_service_search_req(uint8_t *buffer, uint16_t attribute)
+{
+    int len = 0;
+
+    buffer[len++] = SDP_ServiceSearchRequest;
+    big_endian_store_16(buffer, len, s_sdp_transaction_id++);
+    len += 2;
+
+    /* parameters length, we'll fill it later */
+    len += 2;
+
+    const uint8_t *search_pattern = sdp_service_search_pattern_for_uuid16(attribute);
+    uint16_t search_pattern_len = de_get_len(search_pattern);
+    memcpy(buffer + len, search_pattern, search_pattern_len);
+    len += search_pattern_len;
+
+    //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
+    big_endian_store_16(buffer, len, 0x3);
+    len += 2;
+
+    //     ContinuationState - uint8_t number of cont. bytes N<=16
+    buffer[len++] = 0;
+
+    // uint16_t paramLength
+    big_endian_store_16(buffer, 3, len - 5);
+    return len;
+}
+
+static int sdp_build_service_attribute_req(uint8_t *buffer,
+                                           uint32_t service_id,
+                                           uint16_t attribute)
+{
+    int len = 0;
+
+    buffer[len++] = SDP_ServiceAttributeRequest;
+    big_endian_store_16(buffer, len, s_sdp_transaction_id++);
+    len += 2;
+
+    /* parameters length, we'll fill it later */
+    len += 2;
+
+    big_endian_store_32(buffer, len, service_id);
+    len += 4;
+
+    //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
+    big_endian_store_16(buffer, len, 4096);
+    len += 2;
+
+    /* AttibuteIDList (all) */
+    static const uint8_t attribute_id_list[] = {0x35, 0x05, 0x0A, 0x00, 0x00, 0xff, 0xff};
+    uint16_t attribute_id_list_len = de_get_len(attribute_id_list);
+    memcpy(buffer + len, attribute_id_list, attribute_id_list_len);
+    len += attribute_id_list_len;
+
+    //     ContinuationState - uint8_t number of cont. bytes N<=16
+    buffer[len++] = s_sdp_continuation_len;
+    if (s_sdp_continuation_len > 0) {
+        memcpy(buffer + len, s_sdp_continuation_code, s_sdp_continuation_len);
+        len += s_sdp_continuation_len;
+    }
+
+    // uint16_t paramLength
+    big_endian_store_16(buffer, 3, len - 5);
+    return len;
+}
+
+static int sdp_build_search_attribute_req(uint8_t *buffer, uint16_t attribute)
+{
+    int len = 0;
+
+    buffer[len++] = SDP_ServiceSearchAttributeRequest;
+    big_endian_store_16(buffer, len, s_sdp_transaction_id++);
+    len += 2;
+
+    /* parameters length, we'll fill it later */
+    len += 2;
+
+    const uint8_t *search_pattern = sdp_service_search_pattern_for_uuid16(attribute);
+    uint16_t search_pattern_len = de_get_len(search_pattern);
+    memcpy(buffer + len, search_pattern, search_pattern_len);
+    len += search_pattern_len;
+
+    //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
+    big_endian_store_16(buffer, len, 0x20);
+    len += 2;
+
+    /* AttibuteIDList (all) */
+    static const uint8_t attribute_id_list[] = {0x35, 0x05, 0x0A, 0x00, 0x00, 0xff, 0xff};
+    uint16_t attribute_id_list_len = de_get_len(attribute_id_list);
+    memcpy(buffer + len, attribute_id_list, attribute_id_list_len);
+    len += attribute_id_list_len;
+
+    //     ContinuationState - uint8_t number of cont. bytes N<=16
+    buffer[len++] = 0;
+
+    // uint16_t paramLength
+    big_endian_store_16(buffer, 3, len - 5);
+    return len;
+}
+
 static void sdp_got_message(BtL2capHandle *handle, void *msg, size_t len,
                             void *cb_data)
 {
     DeviceData *data = cb_data;
-    data->sdp_got_response = true;
 
     set_animating(false);
+    data->sdp_num_responses++;
     if (len > sizeof(data->sdp_response)) {
         len = sizeof(data->sdp_response);
     }
@@ -648,36 +806,24 @@ static void sdp_connect_cb(const BtConnectResult *result, void *cb_data)
 
     bt_l2cap_handle_notify(handle, sdp_got_message, data);
 
-    /* This needs checking */
-    char msg[] = {
-        0x06, /* SDP_SERVICE_SEARCH_ATTRIBUTE_REQUEST_PDU */
-        0x00, 0x00, /* Transaction ID */
-        0x00, 0x10, /* Parameter length */
-        0x35, /* DataElementSequence */
-        0x03, /* Element size */
-        0x19, /* Uuid16 */
-        0x10, 0x02, /* BLUETOOTH_ATTRIBUTE_PUBLIC_BROWSE_ROOT */
-        0x20, 0x20, /* Max attribute count */
-        /* AttributeIdList */
-        0x35, /* DataElementSequence */
-        0x06, /* Data size */
-        0x09, /* unsigned, 2 bytes */
-        0x00, 0x00, /* ServiceName */
-        0x09, /* unsigned, 2 bytes */
-        0x00, 0x01, /* ServiceDescription */
-        0x00, /* Continuation state */
-    };
-    bt_l2cap_handle_write(handle, msg, sizeof(msg));
+    uint8_t buffer[256];
+    /* BLUETOOTH_ATTRIBUTE_PUBLIC_BROWSE_ROOT */
+    //int len = sdp_build_search_attribute_req(buffer, 0x1002);
+    int len = sdp_build_search_attribute_req(buffer, 0x1002);
+
+    bt_l2cap_handle_write(handle, buffer, len);
 }
 
 static void screen_sdp_reset()
 {
     DeviceData *data = &s_device_data;
 
+    s_sdp_transaction_id = 0;
+    data->current_row = 0;
     data->error_code = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
-    data->sdp_got_response = false;
+    data->sdp_num_responses = 0;
     data->sdp_response_len = 0;
     set_animating(true);
     bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
@@ -704,6 +850,22 @@ static void print_row_data(char *data, int len)
     printf(" %.*s\n", len, data);
 }
 
+static void print_data(const void *data, int len)
+{
+    int written = 0;
+    for (int i = 0; i < 20 && written < len; i++) {
+        char input[16];
+        memset(input, 0, sizeof(input));
+        int row_len = len - written;
+        if (row_len > sizeof(input)) {
+            row_len = sizeof(input);
+        }
+        memcpy(input, (const char*)data + written, row_len);
+        print_row_data(input, sizeof(input));
+        written += row_len;
+    }
+}
+
 static void screen_sdp_draw()
 {
     const DeviceData *data = &s_device_data;
@@ -726,19 +888,23 @@ static void screen_sdp_draw()
         printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
     }
 
-    if (data->sdp_got_response) {
+    if (data->sdp_num_responses) {
         printf("Got response, size = %d\n", data->sdp_response_len);
-        int written = 0;
-        for (int i = 0; i < 20 && written < data->sdp_response_len; i++) {
-            char input[16];
-            memset(input, 0, sizeof(input));
-            int row_len = data->sdp_response_len - written;
-            if (row_len > sizeof(input)) {
-                row_len = sizeof(input);
+        if (data->sdp_response_len > 7 && data->sdp_response[0] == 0x7) {
+            de_dump_data_element(data->sdp_response + 7, data->current_row, 18);
+        } else {
+            int written = 0;
+            for (int i = 0; i < 20 && written < data->sdp_response_len; i++) {
+                char input[16];
+                memset(input, 0, sizeof(input));
+                int row_len = data->sdp_response_len - written;
+                if (row_len > sizeof(input)) {
+                    row_len = sizeof(input);
+                }
+                memcpy(input, data->sdp_response + written, row_len);
+                print_row_data(input, sizeof(input));
+                written += row_len;
             }
-            memcpy(input, data->sdp_response + written, row_len);
-            print_row_data(input, sizeof(input));
-            written += row_len;
         }
     }
 
@@ -749,8 +915,184 @@ static void screen_sdp_draw()
 
 static void screen_sdp_process_input(u32 buttons)
 {
+    DeviceData *data = &s_device_data;
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
+    } else if (buttons & WPAD_BUTTON_LEFT) {
+        data->current_row++;
+    } else if (buttons & WPAD_BUTTON_RIGHT) {
+        if (data->current_row > 0)
+            data->current_row--;
+    }
+}
+
+static void sdp_hid_got_message(BtL2capHandle *handle, void *message, size_t len,
+                                void *cb_data)
+{
+    DeviceData *data = cb_data;
+    const uint8_t *msg = message;
+    data->sdp_num_responses++;
+
+    queue_refresh();
+    if (len <= 0) {
+        data->conn_status = CONN_STATUS_NULL_RESPONSE;
+        data->has_pending_call = false;
+        set_animating(false);
+        return;
+    }
+
+    if (msg[0] == SDP_ServiceSearchResponse) {
+        data->conn_status = CONN_STATUS_SDP_HID_SERVICE;
+        if (len >= 9) {
+            data->sdp_num_services = big_endian_read_16(msg, 7);
+        } else {
+            data->sdp_num_services = 0;
+        }
+
+        uint32_t service_id = 0;
+        if (data->sdp_num_services > 0 && len >= 9 + 4) {
+            service_id = big_endian_read_32(msg, 9);
+        }
+        data->sdp_hid_service_id = service_id;
+        data->sdp_response_len = 0;
+        data->sdp_num_responses = 0;
+
+        if (service_id != 0) {
+            uint8_t buffer[256];
+            s_sdp_continuation_len = 0;
+            int len = sdp_build_service_attribute_req(buffer, service_id,
+                                                      BLUETOOTH_ATTRIBUTE_HID_DESCRIPTOR_LIST);
+
+            bt_l2cap_handle_write(handle, buffer, len);
+        } else {
+            copy_response(msg, len, data->sdp_response, &data->sdp_response_len,
+                          sizeof(data->sdp_response));
+            data->has_pending_call = false;
+            set_animating(false);
+        }
+    } else if (msg[0] == SDP_ServiceAttributeResponse) {
+        bool cont = sdp_save_service_attribute(msg, len,
+                                               data->sdp_response, &data->sdp_response_len,
+                                               sizeof(data->sdp_response));
+        if (cont) {
+            uint8_t buffer[256];
+            int len = sdp_build_service_attribute_req(buffer, data->sdp_hid_service_id,
+                                                      BLUETOOTH_ATTRIBUTE_HID_DESCRIPTOR_LIST);
+            bt_l2cap_handle_write(handle, buffer, len);
+        } else {
+            data->has_pending_call = false;
+            data->conn_status = CONN_STATUS_SDP_HID_ATTRIBUTES;
+            set_animating(false);
+        }
+    }
+}
+
+static void sdp_hid_connect_cb(const BtConnectResult *result, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    queue_refresh();
+    if (result->error_code == 0) {
+        data->conn_status = CONN_STATUS_CONNECTED;
+    } else {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+    }
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
+    BtL2capHandle *handle = data->sdp_handle = result->handle;
+
+    bt_l2cap_handle_notify(handle, sdp_hid_got_message, data);
+
+    uint8_t buffer[256];
+    int len = sdp_build_service_search_req(buffer, 0x1124);
+
+    bt_l2cap_handle_write(handle, buffer, len);
+}
+
+static void screen_sdp_hid_reset()
+{
+    DeviceData *data = &s_device_data;
+
+    s_sdp_transaction_id = 0;
+    data->current_row = 0;
+    data->error_code = 0;
+    data->l2cap_status = 0;
+    data->conn_status = CONN_STATUS_CONNECTING;
+    data->sdp_num_responses = false;
+    data->sdp_response_len = 0;
+    data->has_pending_call = true;
+    set_animating(true);
+    bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
+               sdp_hid_connect_cb, data);
+}
+
+static void screen_sdp_hid_pop()
+{
+    screen_sdp_pop();
+}
+
+static void screen_sdp_hid_draw()
+{
+    const DeviceData *data = &s_device_data;
+
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    char bdaddr[20];
+    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    printf("SDP TO %s - %.64s", bdaddr, data->device.name);
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    char anim_char = get_anim_char();
+    if (!data->has_pending_call) {
+        anim_char = 'x';
+    }
+
+    if (data->conn_status == CONN_STATUS_CONNECTING) {
+        printf("Connecting... %c\n", anim_char);
+    } else if (data->conn_status == CONN_STATUS_DISCONNECTED) {
+        printf("Disconnected     \n");
+        printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
+    } else if (data->conn_status == CONN_STATUS_CONNECTED) {
+        printf("Connected.\n");
+        printf("Getting service ID... %c                  \n", anim_char);
+    } else if (data->conn_status == CONN_STATUS_SDP_HID_SERVICE) {
+        if (data->sdp_hid_service_id != 0) {
+            printf("Got HID service: 0x%x\n", data->sdp_hid_service_id);
+            printf("Getting attributes... %c (%d resp, cont len=%d)      \n", anim_char,
+                   data->sdp_num_responses, s_sdp_continuation_len);
+        } else {
+            printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
+            printf("Failed to get service ID (response length = %d).\n", data->sdp_response_len);
+            print_data(data->sdp_response, data->sdp_response_len);
+        }
+    } else if (data->conn_status == CONN_STATUS_SDP_HID_ATTRIBUTES) {
+        printf("Got response size %d\n", data->sdp_response_len);
+        //print_data(data->sdp_response, data->sdp_response_len);
+        de_dump_data_element(data->sdp_response, data->current_row, 18);
+    } else if (data->conn_status == CONN_STATUS_NULL_RESPONSE) {
+        printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
+        printf("Got an empty response\n");
+    }
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_sdp_hid_process_input(u32 buttons)
+{
+    DeviceData *data = &s_device_data;
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
+    } else if (buttons & WPAD_BUTTON_LEFT) {
+        queue_refresh();
+        data->current_row++;
+    } else if (buttons & WPAD_BUTTON_RIGHT) {
+        if (data->current_row > 0) {
+            queue_refresh();
+            data->current_row--;
+        }
     }
 }
 
@@ -868,6 +1210,12 @@ static const ScreenMethods s_screens[SCREEN_LAST] = {
         screen_sdp_draw,
         screen_sdp_process_input,
         screen_sdp_pop,
+    },
+    [SCREEN_SDP_HID] = {
+        screen_sdp_hid_reset,
+        screen_sdp_hid_draw,
+        screen_sdp_hid_process_input,
+        screen_sdp_hid_pop,
     },
     [SCREEN_HID] = {
         screen_hid_reset,
