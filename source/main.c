@@ -30,7 +30,10 @@ typedef enum {
 } ActionId;
 
 static ScreenId s_screen_stack[10] = { SCREEN_TITLE };
+#define FRAMES_BETWEEN_ANIMATION 5
 static int s_screen_index = 0;
+static bool s_screen_needs_refresh = true;
+static bool s_screen_runs_animation = false;
 
 static conf_pads s_paired_devices;
 static conf_pad_guests s_guest_devices;
@@ -113,6 +116,16 @@ static const ActionItem s_device_actions[] = {
 static void retrive_device_names(SearchDeviceData *data);
 static const ScreenMethods *current_screen();
 
+static void queue_refresh()
+{
+    s_screen_needs_refresh = true;
+}
+
+static void set_animating(bool animating)
+{
+    s_screen_runs_animation = animating;
+}
+
 static int sprintf_bdaddr(char *dest, const u8 *bdaddr)
 {
     return sprintf(dest, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -161,7 +174,8 @@ static const char *describe_device(u8 major, u8 minor)
 
 static void push_screen(ScreenId id)
 {
-    consoleClear();
+    queue_refresh();
+    set_animating(false);
     s_screen_stack[++s_screen_index] = id;
 
     const ScreenMethods *screen = current_screen();
@@ -175,7 +189,8 @@ static ScreenId current_screen_id(void)
 
 static void pop_screen()
 {
-    consoleClear();
+    set_animating(false);
+    queue_refresh();
     if (s_screen_index > 0) s_screen_index--;
 }
 
@@ -183,7 +198,12 @@ static char get_anim_char()
 {
     static const char wait_seq[] = "\\|/-";
     static int last_char = 0;
-    return wait_seq[last_char++ % 4];
+    static int frames_since_last_update = 0;
+    if (s_screen_runs_animation &&
+        frames_since_last_update % FRAMES_BETWEEN_ANIMATION == 0) {
+        last_char++;
+    }
+    return wait_seq[last_char % 4];
 }
 
 static bool is_active(const u8 *bdaddr) {
@@ -227,11 +247,15 @@ void screen_title_process_input(u32 buttons)
             s_quit_requested = true;
         }
     } else if (buttons & (WPAD_BUTTON_DOWN | WPAD_BUTTON_LEFT)) {
-        if (s_title_item_index + 1 < TITLE_NUM_SCREENS)
+        if (s_title_item_index + 1 < TITLE_NUM_SCREENS) {
+            queue_refresh();
             s_title_item_index++;
+        }
     } else if (buttons & (WPAD_BUTTON_UP | WPAD_BUTTON_RIGHT)) {
-        if (s_title_item_index > 0)
+        if (s_title_item_index > 0) {
+            queue_refresh();
             s_title_item_index--;
+        }
     }
 }
 
@@ -313,7 +337,6 @@ static void screen_search_devices_reset()
 
 static void screen_search_devices_draw()
 {
-    consoleClear();
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
     printf("SEARCH DEVICES");
 
@@ -392,24 +415,31 @@ static void on_name_retrieved(const BtReadRemoteNameResult *result, void *cb_dat
         }
     }
 
+    queue_refresh();
     retrive_device_names(data);
 }
 
 static void retrive_device_names(SearchDeviceData *data)
 {
+    bool has_pending_operation = false;
+
     for (int i = 0; i < data->num_devices; i++) {
         DeviceEntry *device = &data->devices[i];
         if (device->querying_name) {
             /* Let's wait for this operation to complete */
+            has_pending_operation = true;
             break;
         }
 
         if (!device->queried_name) {
+            has_pending_operation = true;
             device->querying_name = true;
             bt_read_remote_name(device->bdaddr, on_name_retrieved, data);
             break;
         }
     }
+
+    set_animating(has_pending_operation);
 }
 
 static void search_devices_cb(const BtScanResult *result, void *cb_data)
@@ -447,19 +477,26 @@ static void screen_search_devices_process_input(u32 buttons)
     } else if (buttons & WPAD_BUTTON_2) {
         if (data->item_index == 0) {
             data->search_running = true;
+            set_animating(true);
+            queue_refresh();
             bt_scan(data->lap, search_devices_cb, data);
         } else {
             push_screen(SCREEN_DEVICE);
         }
     } else if (buttons & WPAD_BUTTON_A) {
+        queue_refresh();
         data->lap = (data->lap == BT_LAP_GIAC) ?
             BT_LAP_LIAC : BT_LAP_GIAC;
     } else if (buttons & WPAD_BUTTON_LEFT) {
-        if (data->item_index < data->num_devices)
+        if (data->item_index < data->num_devices) {
+            queue_refresh();
             data->item_index++;
+        }
     } else if (buttons & WPAD_BUTTON_RIGHT) {
-        if (data->item_index > 0)
+        if (data->item_index > 0) {
+            queue_refresh();
             data->item_index--;
+        }
     }
 }
 
@@ -510,11 +547,15 @@ static void screen_device_process_input(u32 buttons)
             push_screen(action_id);
         }
     } else if (buttons & WPAD_BUTTON_LEFT) {
-        if (data->item_index < DEVICE_NUM_ACTIONS)
+        if (data->item_index < DEVICE_NUM_ACTIONS) {
+            queue_refresh();
             data->item_index++;
+        }
     } else if (buttons & WPAD_BUTTON_RIGHT) {
-        if (data->item_index > 0)
+        if (data->item_index > 0) {
+            queue_refresh();
             data->item_index--;
+        }
     }
 }
 
@@ -529,6 +570,7 @@ static void connect_cb(const BtConnectResult *result, void *cb_data)
     }
     data->error_code = result->error_code;
     data->l2cap_status = result->status;
+    set_animating(false);
 }
 
 static void screen_connect_reset()
@@ -538,6 +580,7 @@ static void screen_connect_reset()
     data->error_code = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
+    set_animating(true);
     bt_connect(data->device.bdaddr, true, BT_PSM_HID_CONTROL,
                connect_cb, data);
 }
@@ -581,6 +624,8 @@ static void sdp_got_message(BtL2capHandle *handle, void *msg, size_t len,
 {
     DeviceData *data = cb_data;
     data->sdp_got_response = true;
+
+    set_animating(false);
     if (len > sizeof(data->sdp_response)) {
         len = sizeof(data->sdp_response);
     }
@@ -634,6 +679,7 @@ static void screen_sdp_reset()
     data->conn_status = CONN_STATUS_CONNECTING;
     data->sdp_got_response = false;
     data->sdp_response_len = 0;
+    set_animating(true);
     bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
                sdp_connect_cb, data);
 }
@@ -716,6 +762,7 @@ static void hid_connect_intr_cb(const BtConnectResult *result, void *cb_data)
     data->l2cap_status = result->status;
     if (result->error_code != 0) {
         data->conn_status = CONN_STATUS_DISCONNECTED;
+        set_animating(false);
         return;
     }
 
@@ -731,6 +778,7 @@ static void hid_connect_ctrl_cb(const BtConnectResult *result, void *cb_data)
     data->l2cap_status = result->status;
     if (result->error_code != 0) {
         data->conn_status = CONN_STATUS_DISCONNECTED;
+        set_animating(false);
         return;
     }
 
@@ -745,6 +793,7 @@ static void screen_hid_reset()
     data->error_code = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
+    set_animating(true);
     bt_connect(data->device.bdaddr, true, BT_PSM_HID_CONTROL,
                hid_connect_ctrl_cb, data);
 }
@@ -852,17 +901,27 @@ int main(int argc, char **argv) {
     CON_InitEx(rmode, 0, 0, rmode->fbWidth,rmode->xfbHeight);
     CON_GetMetrics(&s_screen_w, &s_screen_h);
 
+    int frames_since_last_refresh = 0;
 	while (!s_quit_requested) {
 		WPAD_ScanPads();
 		u32 pressed = WPAD_ButtonsDown(0);
 		if (pressed & WPAD_BUTTON_HOME)
             s_quit_requested = true;
 
+        if (s_screen_needs_refresh ||
+            (s_screen_runs_animation &&
+             frames_since_last_refresh > FRAMES_BETWEEN_ANIMATION)) {
+            consoleClear();
+            frames_since_last_refresh = 0;
+            s_screen_needs_refresh = false;
+        }
+
         const ScreenMethods *screen = current_screen();
         screen->draw();
         if (screen->process_input) screen->process_input(pressed);
 
 		VIDEO_WaitVSync();
+        frames_since_last_refresh++;
 	}
 
 	return EXIT_SUCCESS;
