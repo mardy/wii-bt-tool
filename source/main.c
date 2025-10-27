@@ -807,10 +807,8 @@ static void sdp_connect_cb(const BtConnectResult *result, void *cb_data)
     bt_l2cap_handle_notify(handle, sdp_got_message, data);
 
     uint8_t buffer[256];
-    /* BLUETOOTH_ATTRIBUTE_PUBLIC_BROWSE_ROOT */
-    //int len = sdp_build_search_attribute_req(buffer, 0x1002);
-    int len = sdp_build_search_attribute_req(buffer, 0x1002);
-
+    int len = sdp_build_search_attribute_req(buffer,
+                            BLUETOOTH_PROTOCOL_L2CAP);
     bt_l2cap_handle_write(handle, buffer, len);
 }
 
