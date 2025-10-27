@@ -95,6 +95,7 @@ typedef enum {
     CONN_STATUS_CONNECTED,
     CONN_STATUS_SDP_HID_SERVICE,
     CONN_STATUS_SDP_HID_ATTRIBUTES,
+    CONN_STATUS_SDP_BROWSE_COMPLETE,
     CONN_STATUS_NULL_RESPONSE,
 } ConnectionStatus;
 
@@ -743,6 +744,35 @@ static int sdp_build_service_attribute_req(uint8_t *buffer,
     return len;
 }
 
+/* Returns true if the response needs completion */
+static bool sdp_save_search_attribute(const uint8_t *response, int size,
+                                      uint8_t *dest, int *dest_len, int dest_max_len)
+{
+    int offset = 3; /* command ID + transaction ID */
+
+    if (offset + 2 + 2 > size) return false;  // parameterLength, attributeListByteCount
+
+    uint16_t parameter_length = big_endian_read_16(response, offset);
+    offset += 2;
+    if (offset + parameter_length > size) return false;
+
+    uint16_t attribute_list_size = big_endian_read_16(response, offset);
+    offset += 2;
+    if (!copy_response(response + offset, attribute_list_size,
+                       dest, dest_len, dest_max_len)) return false;
+    offset += attribute_list_size;
+    if (offset + 1 > size) return false; /* 1 byte for continuation state */
+
+    uint8_t continuation_len = response[offset++];
+    if (continuation_len == 0 ||
+        continuation_len > 16 ||
+        offset + continuation_len > size) return false;
+
+    memcpy(s_sdp_continuation_code, response + offset, continuation_len);
+    s_sdp_continuation_len = continuation_len;
+    return true;
+}
+
 static int sdp_build_search_attribute_req(uint8_t *buffer, uint16_t attribute)
 {
     int len = 0;
@@ -760,7 +790,7 @@ static int sdp_build_search_attribute_req(uint8_t *buffer, uint16_t attribute)
     len += search_pattern_len;
 
     //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
-    big_endian_store_16(buffer, len, 0x20);
+    big_endian_store_16(buffer, len, 0xffff);
     len += 2;
 
     /* AttibuteIDList (all) */
@@ -770,7 +800,11 @@ static int sdp_build_search_attribute_req(uint8_t *buffer, uint16_t attribute)
     len += attribute_id_list_len;
 
     //     ContinuationState - uint8_t number of cont. bytes N<=16
-    buffer[len++] = 0;
+    buffer[len++] = s_sdp_continuation_len;
+    if (s_sdp_continuation_len > 0) {
+        memcpy(buffer + len, s_sdp_continuation_code, s_sdp_continuation_len);
+        len += s_sdp_continuation_len;
+    }
 
     // uint16_t paramLength
     big_endian_store_16(buffer, 3, len - 5);
@@ -782,26 +816,39 @@ static void sdp_got_message(BtL2capHandle *handle, void *msg, size_t len,
 {
     DeviceData *data = cb_data;
 
-    set_animating(false);
+    queue_refresh();
     data->sdp_num_responses++;
-    if (len > sizeof(data->sdp_response)) {
-        len = sizeof(data->sdp_response);
+
+    bool cont = sdp_save_search_attribute(msg, len,
+                                          data->sdp_response, &data->sdp_response_len,
+                                          sizeof(data->sdp_response));
+    if (cont) {
+        uint8_t buffer[256];
+        int len = sdp_build_search_attribute_req(buffer,
+                                  BLUETOOTH_PROTOCOL_L2CAP);
+        bt_l2cap_handle_write(handle, buffer, len);
+    } else {
+        data->has_pending_call = false;
+        data->conn_status = CONN_STATUS_SDP_BROWSE_COMPLETE;
+        set_animating(false);
     }
-    memcpy(data->sdp_response, msg, len);
-    data->sdp_response_len = len;
 }
 
 static void sdp_connect_cb(const BtConnectResult *result, void *cb_data)
 {
     DeviceData *data = cb_data;
 
+    queue_refresh();
+
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
     if (result->error_code == 0) {
         data->conn_status = CONN_STATUS_CONNECTED;
     } else {
         data->conn_status = CONN_STATUS_DISCONNECTED;
+        set_animating(false);
+        return;
     }
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
     BtL2capHandle *handle = data->sdp_handle = result->handle;
 
     bt_l2cap_handle_notify(handle, sdp_got_message, data);
@@ -816,6 +863,7 @@ static void screen_sdp_reset()
 {
     DeviceData *data = &s_device_data;
 
+    s_sdp_continuation_len = 0;
     s_sdp_transaction_id = 0;
     data->current_row = 0;
     data->error_code = 0;
@@ -823,6 +871,7 @@ static void screen_sdp_reset()
     data->conn_status = CONN_STATUS_CONNECTING;
     data->sdp_num_responses = 0;
     data->sdp_response_len = 0;
+    data->has_pending_call = true;
     set_animating(true);
     bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
                sdp_connect_cb, data);
@@ -880,16 +929,17 @@ static void screen_sdp_draw()
 
     if (data->conn_status == CONN_STATUS_CONNECTING) {
         printf("Connecting... %c\n", anim_char);
-    } else {
-        printf("%s      \n", data->conn_status == CONN_STATUS_CONNECTED ?
-               "Connected" : "Disconnected");
+    } else if (data->conn_status == CONN_STATUS_DISCONNECTED) {
+        printf("Disconnected     \n");
         printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
-    }
-
-    if (data->sdp_num_responses) {
+    } else if (data->conn_status == CONN_STATUS_CONNECTED) {
+        printf("Connected.\n");
+        printf("Browsing SDP services... %c (%d resp, cont len=%d)\n", anim_char,
+               data->sdp_num_responses, s_sdp_continuation_len);
+    } else if (data->conn_status == CONN_STATUS_SDP_BROWSE_COMPLETE) {
         printf("Got response, size = %d\n", data->sdp_response_len);
-        if (data->sdp_response_len > 7 && data->sdp_response[0] == 0x7) {
-            de_dump_data_element(data->sdp_response + 7, data->current_row, 18);
+        if (data->sdp_response_len > 0) { // TODO keep only this branch
+            de_dump_data_element(data->sdp_response, data->current_row, 18);
         } else {
             int written = 0;
             for (int i = 0; i < 20 && written < data->sdp_response_len; i++) {
@@ -917,10 +967,13 @@ static void screen_sdp_process_input(u32 buttons)
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
     } else if (buttons & WPAD_BUTTON_LEFT) {
+        queue_refresh();
         data->current_row++;
     } else if (buttons & WPAD_BUTTON_RIGHT) {
-        if (data->current_row > 0)
+        if (data->current_row > 0) {
+            queue_refresh();
             data->current_row--;
+        }
     }
 }
 
