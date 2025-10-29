@@ -1,5 +1,7 @@
 #include "report_usage.h"
 
+#include <stdio.h>
+
 int8_t *ri_GenericDesktop(int32_t usage)
 {
     switch (usage)
@@ -617,7 +619,7 @@ int8_t *ri_LEDs(int32_t usage)
 
 int8_t *ri_Button(int32_t usage)
 {
-    static int8_t str[16];
+    static char str[16];
 
     sprintf(str,"Button %d", usage);
 
@@ -626,7 +628,7 @@ int8_t *ri_Button(int32_t usage)
 
 int8_t *ri_Ordinal(int32_t usage)
 {
-    static int8_t str[16];
+    static char str[16];
 
     sprintf(str,"Instance %d", usage);
 
