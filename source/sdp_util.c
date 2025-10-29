@@ -810,3 +810,724 @@ uint8_t* sdp_service_search_pattern_for_uuid128(const uint8_t * uuid128){
     return (uint8_t*)des_service_search_pattern_uuid128;
 }
 
+
+#include "bluetooth_sdp.h"
+typedef enum {
+    SDP_TYPE_ANY = 0,
+    SDP_TYPE_BOOL,
+    SDP_TYPE_UINT8,
+    SDP_TYPE_UINT16,
+    SDP_TYPE_UINT32,
+    SDP_TYPE_HEX8,
+    SDP_TYPE_HEX16,
+    SDP_TYPE_HEX32,
+    SDP_TYPE_UUID,
+    SDP_TYPE_STRING,
+    SDP_TYPE_URL,
+    SDP_TYPE_LANG_CODE,
+    SDP_VERSION_JJMM, /* B.C.D. */
+    SDP_VERSION_JJMN, /* B.C.D. */
+    SDP_CLASS_LIST, /* UUIDs */
+    SDP_PROT_DESC_LIST,
+    SDP_ADD_PROT_DESC_LIST,
+    SDP_PROF_DESC_LIST,
+    SDP_HID_DESC_LIST,
+    SDP_HID_DESC_REPORT,
+    SDP_LANGUAGE_LIST,
+    SDP_ATTR_LIST,
+    SDP_TYPE_LAST
+} SdpAttributeValueType;
+
+typedef struct {
+    uint16_t id;
+    char *name;
+    SdpAttributeValueType value_type;
+} SdpAttribute;
+
+static const SdpAttribute s_sdp_universal_attributes[] = {
+    { 0x0000, "ServiceRecordHandle", SDP_TYPE_HEX32 },
+    { 0x0001, "ServiceClassIDList", SDP_CLASS_LIST },
+    { 0x0002, "ServiceRecordState", SDP_TYPE_HEX32 },
+    { 0x0003, "ServiceID", SDP_TYPE_UUID },
+    { 0x0004, "ProtocolDescriptorList", SDP_PROT_DESC_LIST },
+    { 0x0005, "BrowseGroupList", SDP_CLASS_LIST },
+    { 0x0006, "LanguageBaseAttributeIDList", SDP_LANGUAGE_LIST },
+    { 0x0007, "ServiceInfoTimeToLive", SDP_TYPE_UINT32 },
+    { 0x0008, "ServiceAvailability", SDP_TYPE_HEX8 },
+    { 0x0009, "BluetoothProfileDescriptorList", SDP_PROF_DESC_LIST },
+    { 0x000A, "DocumentationURL", SDP_TYPE_URL },
+    { 0x000B, "ClientExecutableURL", SDP_TYPE_URL },
+    { 0x000C, "IconURL", SDP_TYPE_URL },
+    { 0x000D, "AdditionalProtocolDescriptorLists", SDP_ADD_PROT_DESC_LIST },
+    { 0, NULL, SDP_TYPE_ANY }
+};
+
+static const SdpAttribute s_sdp_translatable_attributes[] = {
+    { 0x0000, "ServiceName", SDP_TYPE_STRING },
+    { 0x0001, "ServiceDescription", SDP_TYPE_STRING },
+    { 0x0002, "ProviderName", SDP_TYPE_STRING },
+    { 0, NULL, SDP_TYPE_ANY }
+};
+
+static const SdpAttribute s_sdp_hid_attributes[] = {
+    { 0x0200, "HIDDeviceReleaseNumber", SDP_VERSION_JJMN },
+    { 0x0201, "HIDParserVersion", SDP_VERSION_JJMN },
+    { 0x0202, "HIDDeviceSubclass", SDP_TYPE_UINT8 },
+    { 0x0203, "HIDCountryCode", SDP_TYPE_UINT8 },
+    { 0x0204, "HIDVirtualCable", SDP_TYPE_BOOL },
+    { 0x0205, "HIDReconnectInitiate", SDP_TYPE_BOOL },
+    { 0x0206, "HIDDescriptorList", SDP_HID_DESC_LIST },
+    { 0x0207, "HIDLANGIDBaseList", SDP_LANGUAGE_LIST },
+    { 0x0208, "HIDSDPDisable", SDP_TYPE_BOOL },
+    { 0x0209, "HIDBatteryPower", SDP_TYPE_BOOL },
+    { 0x020A, "HIDRemoteWake", SDP_TYPE_BOOL },
+    { 0x020B, "HIDProfileVersion", SDP_VERSION_JJMN },
+    { 0x020C, "HIDSupervisionTimeout", SDP_TYPE_UINT16 },
+    { 0x020D, "HIDNormallyConnectable", SDP_TYPE_BOOL },
+    { 0x020E, "HIDBootDevice", SDP_TYPE_BOOL },
+    { 0x020F, "HIDSSRHostMaxLatency", SDP_TYPE_UINT16 },
+    { 0x0210, "HIDSSRHostMinTimeout", SDP_TYPE_UINT16 },
+    { 0, NULL, SDP_TYPE_ANY }
+};
+
+static const SdpAttribute s_sdp_did_attributes[] = {
+    { 0x0200, "SpecificationID", SDP_VERSION_JJMM },
+    { 0x0201, "VendorID", SDP_TYPE_HEX16 },
+    { 0x0202, "ProductID", SDP_TYPE_HEX16 },
+    { 0x0203, "Version", SDP_VERSION_JJMN },
+    { 0x0204, "PrimaryRecord", SDP_TYPE_BOOL },
+    { 0x0205, "VendorIDSource", SDP_TYPE_UINT16 },
+    { 0, NULL, SDP_TYPE_ANY }
+};
+
+typedef struct {
+    uint16_t class_id;
+    const SdpAttribute *attributes;
+} SdpClassAttributes;
+
+static const SdpClassAttributes s_sdp_attibutes[] = {
+    {
+        0,
+        s_sdp_universal_attributes,
+    },
+    {
+        BLUETOOTH_SERVICE_CLASS_HUMAN_INTERFACE_DEVICE_SERVICE,
+        s_sdp_hid_attributes
+    },
+    {
+        BLUETOOTH_SERVICE_CLASS_PNP_INFORMATION,
+        s_sdp_did_attributes
+    },
+    { 0, NULL },
+};
+
+static const SdpAttribute *sdp_class_attributes_find(
+    const SdpAttribute *attributes,
+    uint16_t attribute_id)
+{
+    for (const SdpAttribute *a = attributes; a->name != NULL; a++) {
+        if (a->id == attribute_id) return a;
+    }
+    return NULL;
+}
+
+static const SdpAttribute *sdp_get_attribute_record(uint16_t class_id,
+                                                    uint16_t attribute_id)
+{
+    const SdpAttribute *attributes = NULL;
+    for (const SdpClassAttributes *ca = s_sdp_attibutes;
+         ca->attributes != NULL;
+         ca++) {
+        if (ca->class_id == class_id) {
+            attributes = ca->attributes;
+            break;
+        }
+    }
+    if (attributes) {
+        const SdpAttribute *attr =
+            sdp_class_attributes_find(attributes, attribute_id);
+        if (attr) return attr;
+    }
+    return sdp_class_attributes_find(s_sdp_universal_attributes, attribute_id);
+}
+
+typedef struct {
+    int indent;
+    uint16_t service_class_id;
+    uint16_t last_attribute_id;
+    uint16_t last_uuid;
+    uint16_t lang_offset;
+    bool is_attribute;
+    int sequence_index;
+    SdpAttributeValueType expected_type;
+} SdpContext;
+
+static void indent(const SdpContext *context)
+{
+    if (vis()) for (int i = 0; i < context->indent; i++) printf("  ");
+}
+
+static int bcd_byte(uint8_t byte)
+{
+    return (byte / 16) * 10 + byte % 16;
+}
+
+typedef void (*SdpPrintFunc)(SdpContext *context, SdpAttributeValueType type,
+                             const uint8_t *element);
+
+static void sdp_print_element(SdpContext *context, SdpAttributeValueType type,
+                              const uint8_t *element);
+
+static void sdp_print_generic(SdpContext *context, SdpAttributeValueType,
+                              const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    de_traversal_dump_data((uint8_t *)element, type, size, &context->indent);
+}
+
+static void sdp_print_bool(SdpContext *context, SdpAttributeValueType t,
+                           const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_BOOL || size != DE_SIZE_8) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    bool value = element[pos];
+    if (vis()) printf("%s", value ? "true" : "false");
+}
+
+static void sdp_print_uint(SdpContext *context, SdpAttributeValueType t,
+                           const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_UINT) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    uint32_t value = 0;
+    if (size == DE_SIZE_8) value = element[pos];
+    else if (size == DE_SIZE_16) value = big_endian_read_16(element, pos);
+    else if (size == DE_SIZE_32) value = big_endian_read_32(element, pos);
+    if (vis()) printf("%d", value);
+}
+
+static void sdp_print_hex16(SdpContext *context, SdpAttributeValueType t,
+                            const uint8_t *element)
+{
+    de_size_t size = de_get_size_type(element);
+    if (size != DE_SIZE_16) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    uint32_t value = big_endian_read_16(element, pos);
+    if (vis()) printf("0x%04" PRIx16, value);
+}
+
+static void sdp_print_hex32(SdpContext *context, SdpAttributeValueType t,
+                            const uint8_t *element)
+{
+    de_size_t size = de_get_size_type(element);
+    if (size != DE_SIZE_32) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    uint32_t value = big_endian_read_32(element, pos);
+    if (vis()) printf("0x%08" PRIx32, value);
+}
+
+static void sdp_print_uuid(SdpContext *context, SdpAttributeValueType t,
+                           const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_UUID || size != DE_SIZE_16) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    uint32_t value = big_endian_read_16(element, pos);
+    if (vis()) printf("0x%04" PRIx16, value);
+    context->last_uuid = value;
+}
+
+static void sdp_print_string(SdpContext *context, SdpAttributeValueType t,
+                             const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_STRING || (size != DE_SIZE_VAR_8 && size != DE_SIZE_VAR_16)) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    int len = (size == DE_SIZE_VAR_8) ?
+        element[1] : big_endian_read_16(element, 1);
+    if (vis()) {
+        for (int i = 0; i < len; i++) {
+            uint8_t c = element[pos + i];
+            printf("%c", (c >= 0x20 && c <= 0x7f) ? c : '.');
+        }
+    }
+}
+
+static void sdp_print_lang_code(SdpContext *context, SdpAttributeValueType t,
+                                const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_UINT || size != DE_SIZE_16) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    if (vis()) printf("%c%c", (char)element[pos], (char)element[pos+1]);
+}
+
+static void sdp_print_version_jjmm(SdpContext *context, SdpAttributeValueType t,
+                                   const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_UINT || size != DE_SIZE_16) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    if (vis()) printf("%d.%d", bcd_byte(element[pos]), bcd_byte(element[pos+1]));
+}
+
+static void sdp_print_version_jjmn(SdpContext *context, SdpAttributeValueType t,
+                                   const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_UINT || size != DE_SIZE_16) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+    int pos = de_get_header_size(element);
+    uint8_t mn = element[pos + 1];
+    if (vis()) printf("%d.%d.%d", bcd_byte(element[pos]), mn / 16, mn % 16);
+}
+
+static void print_attribute_id(SdpContext *context, const uint8_t *element,
+                               de_type_t type, de_size_t size)
+{
+    uint32_t value;
+
+    unsigned int pos = de_get_header_size(element);
+    const SdpAttribute *attr = NULL;
+    if (size == DE_SIZE_16) {
+        value = big_endian_read_16(element, pos);
+        attr = sdp_get_attribute_record(context->service_class_id, value);
+        if (!attr && context->lang_offset > 0) {
+            attr = sdp_class_attributes_find(s_sdp_translatable_attributes, value - context->lang_offset);
+        }
+    }
+
+    if (attr) {
+        if (vis()) { indent(context); printf("%s: ", attr->name); }
+        context->expected_type = attr->value_type;
+        context->last_attribute_id = value;
+        /* TODO: can we get rid of this and print the newline in the handler? */
+        switch (attr->value_type) {
+        case SDP_TYPE_ANY:
+        case SDP_ATTR_LIST:
+            if (vis()) printf("\n");
+            s_dump_row++;
+        default: break;
+        }
+    } else {
+        context->expected_type = SDP_TYPE_ANY;
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+    }
+}
+
+static int sdp_print_class_list_cb(const uint8_t *element,
+                                   de_type_t type, de_size_t size,
+                                   void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (type != DE_UUID || size != DE_SIZE_16) {
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+        return 0;
+    }
+
+    int pos = de_get_header_size(element);
+    uint32_t value = big_endian_read_16(element, pos);
+    if (context->last_attribute_id == BLUETOOTH_ATTRIBUTE_SERVICE_CLASS_ID_LIST &&
+        context->service_class_id == 0) {
+        context->service_class_id = value;
+    }
+
+    if (vis()) printf("\n");
+    s_dump_row++;
+    if (vis()) { indent(context); printf("- 0x%04" PRIx16, value); }
+    return 0;
+}
+
+static void sdp_print_class_list(SdpContext *context, SdpAttributeValueType t,
+                                 const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    if (context->last_attribute_id == BLUETOOTH_ATTRIBUTE_SERVICE_CLASS_ID_LIST) {
+        context->service_class_id = 0;
+    }
+    de_traverse_sequence(element, sdp_print_class_list_cb, context);
+}
+
+static int sdp_print_prot_desc_cb2(const uint8_t *element,
+                                   de_type_t type, de_size_t size,
+                                   void *my_context)
+{
+    SdpContext *context = my_context;
+
+    sdp_print_element(context, context->expected_type, element);
+    if (context->sequence_index == 0) {
+        if (context->last_uuid == BLUETOOTH_PROTOCOL_L2CAP) {
+            if (vis()) printf(", PSM=");
+            context->expected_type = SDP_TYPE_UINT16;
+        }
+    }
+    context->sequence_index++;
+    return 0;
+}
+
+static int sdp_print_prot_desc_cb(const uint8_t *element,
+                                  de_type_t type, de_size_t size,
+                                  void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (type != DE_DES) {
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+        return 0;
+    }
+
+    if (vis()) printf("\n");
+    s_dump_row++;
+    if (vis()) { indent(context); printf("- "); }
+    context->expected_type = SDP_TYPE_UUID;
+    context->last_uuid = 0;
+    context->sequence_index = 0;
+    de_traverse_sequence(element, sdp_print_prot_desc_cb2, context);
+    return 0;
+}
+
+static void sdp_print_prot_desc_list(SdpContext *context, SdpAttributeValueType t,
+                                     const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    de_traverse_sequence(element, sdp_print_prot_desc_cb, context);
+}
+
+static int sdp_print_add_prot_desc_cb(const uint8_t *element,
+                                      de_type_t type, de_size_t size,
+                                      void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (type != DE_DES) {
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+        return 0;
+    }
+
+    if (vis()) printf("\n");
+    s_dump_row++;
+    if (vis()) {
+        indent(context);
+        printf("- List #%d", context->sequence_index + 1);
+    }
+    context->sequence_index++;
+    context->expected_type = SDP_PROT_DESC_LIST;
+    context->indent++;
+    sdp_print_element(context, context->expected_type, element);
+    context->indent--;
+    return 0;
+}
+
+static void sdp_print_add_prot_desc_list(SdpContext *context, SdpAttributeValueType t,
+                                         const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    context->sequence_index = 0;
+    de_traverse_sequence(element, sdp_print_add_prot_desc_cb, context);
+}
+
+static int sdp_print_prof_desc_cb2(const uint8_t *element,
+                                   de_type_t type, de_size_t size,
+                                   void *my_context)
+{
+    SdpContext *context = my_context;
+    sdp_print_element(context, context->expected_type, element);
+    if (context->sequence_index == 0) {
+        if (vis()) printf(", version ");
+        context->expected_type = SDP_VERSION_JJMM;
+    }
+    context->sequence_index++;
+    return 0;
+}
+
+static int sdp_print_prof_desc_cb(const uint8_t *element,
+                                   de_type_t type, de_size_t size,
+                                   void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (type != DE_DES) {
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+        return 0;
+    }
+
+    if (vis()) printf("\n");
+    s_dump_row++;
+    if (vis()) { indent(context); printf("- "); }
+    context->expected_type = SDP_TYPE_UUID;
+    context->sequence_index = 0;
+    de_traverse_sequence(element, sdp_print_prof_desc_cb2, context);
+    return 0;
+}
+
+static void sdp_print_prof_desc_list(SdpContext *context, SdpAttributeValueType t,
+                                     const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    de_traverse_sequence(element, sdp_print_prof_desc_cb, context);
+}
+
+static int sdp_print_hid_desc_cb2(const uint8_t *element,
+                                  de_type_t type, de_size_t size,
+                                  void *my_context)
+{
+    SdpContext *context = my_context;
+    int pos = de_get_header_size(element);
+    if (context->sequence_index == 0) {
+        const char *descriptor_type;
+        context->expected_type = SDP_TYPE_ANY;
+        switch (element[pos]) {
+        case 0x22:
+            descriptor_type = "Report";
+            context->expected_type = SDP_HID_DESC_REPORT;
+            break;
+        case 0x23:
+            descriptor_type = "Physical";
+            break;
+        default:
+            descriptor_type = "Unknown";
+        }
+        if (vis()) printf("%s descriptor:", descriptor_type);
+    } else {
+        sdp_print_element(context, context->expected_type, element);
+    }
+    context->sequence_index++;
+    return 0;
+}
+
+static int sdp_print_hid_desc_cb(const uint8_t *element,
+                                 de_type_t type, de_size_t size,
+                                 void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (type != DE_DES) {
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+        return 0;
+    }
+
+    if (vis()) { printf("\n"); }
+    s_dump_row++;
+    if (vis()) { indent(context); printf("- "); }
+    context->sequence_index = 0;
+    context->indent++;
+    de_traverse_sequence(element, sdp_print_hid_desc_cb2, context);
+    context->indent--;
+    return 0;
+}
+
+static void sdp_print_hid_desc_list(SdpContext *context, SdpAttributeValueType t,
+                                    const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    de_traverse_sequence(element, sdp_print_hid_desc_cb, context);
+}
+
+static void sdp_print_hid_desc_report(SdpContext *context, SdpAttributeValueType t,
+                                      const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    de_size_t size = de_get_size_type(element);
+    if (type != DE_STRING || (size != DE_SIZE_VAR_8 && size != DE_SIZE_VAR_16)) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    int pos = de_get_header_size(element);
+    int len = (size == DE_SIZE_VAR_8) ?
+        element[1] : big_endian_read_16(element, 1);
+
+    for (int i = 0; i < len; i++) {
+        uint8_t byte = element[pos + i];
+        if (i % 20 == 0) {
+            if (vis()) printf("\n");
+            s_dump_row++;
+        }
+        if (vis()) {
+            if (i % 20 == 0) {
+                indent(context);
+            }
+            printf(" %02x", byte);
+        }
+    }
+}
+
+static int sdp_print_language_list_cb(const uint8_t *element,
+                                      de_type_t type, de_size_t size,
+                                      void *my_context)
+{
+    SdpContext *context = my_context;
+    int el_index = context->sequence_index % 3;
+    if (el_index == 0) {
+        if (vis()) printf("\n");
+        s_dump_row++;
+        if (vis()) { indent(context); printf("- "); }
+        context->expected_type = SDP_TYPE_LANG_CODE;
+    } else {
+        context->expected_type = SDP_TYPE_HEX16;
+        if (context->lang_offset == 0 && el_index == 2 &&
+            type == DE_UINT && size == DE_SIZE_16) {
+            int pos = de_get_header_size(element);
+            context->lang_offset = big_endian_read_16(element, pos);
+        }
+        if (vis()) printf(" ");
+    }
+    sdp_print_element(context, context->expected_type, element);
+    context->sequence_index++;
+    return 0;
+}
+
+static void sdp_print_language_list(SdpContext *context, SdpAttributeValueType t,
+                                const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    context->sequence_index = 0;
+    de_traverse_sequence(element, sdp_print_language_list_cb, context);
+}
+
+static int sdp_print_attr_list_cb(const uint8_t *element,
+                                  de_type_t type, de_size_t size,
+                                  void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (context->is_attribute) {
+        if (type == DE_DES) {
+            context->indent++;
+            de_traverse_sequence(element, sdp_print_attr_list_cb, context);
+            context->indent--;
+            return 0;
+        }
+        print_attribute_id(context, element, type, size);
+    } else {
+        sdp_print_element(context, context->expected_type, element);
+        if (vis()) printf("\n");
+        s_dump_row++;
+    }
+    context->is_attribute = !context->is_attribute;
+    return 0;
+}
+
+static void sdp_print_attr_list(SdpContext *context, SdpAttributeValueType t,
+                                const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    context->is_attribute = true;
+    de_traverse_sequence(element, sdp_print_attr_list_cb, context);
+}
+
+static const SdpPrintFunc s_sdp_print_funcs[] = {
+    [SDP_TYPE_ANY] = sdp_print_generic,
+    [SDP_TYPE_BOOL] = sdp_print_bool,
+    [SDP_TYPE_UINT8] = sdp_print_uint,
+    [SDP_TYPE_UINT16] = sdp_print_uint,
+    [SDP_TYPE_UINT32] = sdp_print_uint,
+    [SDP_TYPE_HEX8] = sdp_print_generic,
+    [SDP_TYPE_HEX16] = sdp_print_hex16,
+    [SDP_TYPE_HEX32] = sdp_print_hex32,
+    [SDP_TYPE_UUID] = sdp_print_uuid,
+    [SDP_TYPE_STRING] = sdp_print_string,
+    [SDP_TYPE_URL] = sdp_print_string,
+    [SDP_TYPE_LANG_CODE] = sdp_print_lang_code,
+    [SDP_VERSION_JJMM] = sdp_print_version_jjmm,
+    [SDP_VERSION_JJMN] = sdp_print_version_jjmn,
+    [SDP_CLASS_LIST] = sdp_print_class_list,
+    [SDP_PROT_DESC_LIST] = sdp_print_prot_desc_list,
+    [SDP_ADD_PROT_DESC_LIST] = sdp_print_add_prot_desc_list,
+    [SDP_PROF_DESC_LIST] = sdp_print_prof_desc_list,
+    [SDP_HID_DESC_LIST] = sdp_print_hid_desc_list,
+    [SDP_HID_DESC_REPORT] = sdp_print_hid_desc_report,
+    [SDP_LANGUAGE_LIST] = sdp_print_language_list,
+    [SDP_ATTR_LIST] = sdp_print_attr_list,
+};
+
+static void sdp_print_element(SdpContext *context, SdpAttributeValueType type,
+                              const uint8_t *element)
+{
+    if (type >= SDP_TYPE_LAST) {
+        type = SDP_TYPE_ANY;
+    }
+
+    s_sdp_print_funcs[type](context, type, element);
+}
+
+void sdp_print_attribute_list(const uint8_t *record, int from_row, int max_rows)
+{
+    SdpContext context = { 0, };
+    s_dump_row = 0;
+    s_dump_from_row = from_row;
+    s_dump_max_rows = max_rows;
+    sdp_print_attr_list(&context, SDP_ATTR_LIST, record);
+}

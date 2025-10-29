@@ -160,6 +160,8 @@ uint8_t* sdp_service_search_pattern_for_uuid128(const uint8_t * uuid128);
 
 /* API_END */
 
+void sdp_print_attribute_list(const uint8_t *record, int from_row, int max_rows);
+
 #if defined __cplusplus
 }
 #endif
