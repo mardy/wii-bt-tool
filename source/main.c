@@ -1308,16 +1308,16 @@ int main(int argc, char **argv) {
 		if (pressed & WPAD_BUTTON_HOME)
             s_quit_requested = true;
 
+        const ScreenMethods *screen = current_screen();
         if (s_screen_needs_refresh ||
             (s_screen_runs_animation &&
              frames_since_last_refresh > FRAMES_BETWEEN_ANIMATION)) {
-            consoleClear();
             frames_since_last_refresh = 0;
             s_screen_needs_refresh = false;
-        }
 
-        const ScreenMethods *screen = current_screen();
-        screen->draw();
+            consoleClear();
+            screen->draw();
+        }
         if (screen->process_input) screen->process_input(pressed, held);
 
 		VIDEO_WaitVSync();
