@@ -45,7 +45,7 @@ static conf_pad_guests s_guest_devices;
 typedef struct {
     void (*reset)(void);
     void (*draw)(void);
-    void (*process_input)(u32 buttons);
+    void (*process_input)(u32 pressed, u32 held);
     void (*pop)(void);
 } ScreenMethods;
 
@@ -253,7 +253,7 @@ static void screen_title_draw()
            CONSOLE_WHITE "2");
 }
 
-void screen_title_process_input(u32 buttons)
+void screen_title_process_input(u32 buttons, u32 held)
 {
     if (buttons & WPAD_BUTTON_2) {
         ActionId action_id = s_title_screen_items[s_title_item_index].action_id;
@@ -302,7 +302,7 @@ static void screen_paired_devices_draw()
            CONSOLE_WHITE "2 - " CONSOLE_RESET "Guest devices" );
 }
 
-void screen_paired_devices_process_input(u32 buttons)
+void screen_paired_devices_process_input(u32 buttons, u32 held)
 {
     if (buttons & WPAD_BUTTON_2) {
         push_screen(SCREEN_GUEST_DEVICES);
@@ -337,7 +337,7 @@ static void screen_guest_devices_draw()
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
 }
 
-void screen_guest_devices_process_input(u32 buttons)
+void screen_guest_devices_process_input(u32 buttons, u32 held)
 {
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
@@ -485,7 +485,7 @@ static void search_devices_cb(const BtScanResult *result, void *cb_data)
     retrive_device_names(data);
 }
 
-static void screen_search_devices_process_input(u32 buttons)
+static void screen_search_devices_process_input(u32 buttons, u32 held)
 {
     SearchDeviceData *data = &s_search_device_data;
     if (buttons & WPAD_BUTTON_1) {
@@ -551,7 +551,7 @@ static void screen_device_draw()
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
 }
 
-static void screen_device_process_input(u32 buttons)
+static void screen_device_process_input(u32 buttons, u32 held)
 {
     DeviceData *data = &s_device_data;
 
@@ -628,7 +628,7 @@ static void screen_connect_draw()
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
 }
 
-static void screen_connect_process_input(u32 buttons)
+static void screen_connect_process_input(u32 buttons, u32 held)
 {
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
@@ -961,15 +961,15 @@ static void screen_sdp_draw()
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
 }
 
-static void screen_sdp_process_input(u32 buttons)
+static void screen_sdp_process_input(u32 buttons, u32 held)
 {
     DeviceData *data = &s_device_data;
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
-    } else if (buttons & WPAD_BUTTON_LEFT) {
+    } else if ((buttons | held) & WPAD_BUTTON_LEFT) {
         queue_refresh();
         data->current_row++;
-    } else if (buttons & WPAD_BUTTON_RIGHT) {
+    } else if ((buttons | held) & WPAD_BUTTON_RIGHT) {
         if (data->current_row > 0) {
             queue_refresh();
             data->current_row--;
@@ -1131,7 +1131,7 @@ static void screen_sdp_hid_draw()
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
 }
 
-static void screen_sdp_hid_process_input(u32 buttons)
+static void screen_sdp_hid_process_input(u32 buttons, u32 held)
 {
     DeviceData *data = &s_device_data;
     if (buttons & WPAD_BUTTON_1) {
@@ -1218,7 +1218,7 @@ static void screen_hid_draw()
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
 }
 
-static void screen_hid_process_input(u32 buttons)
+static void screen_hid_process_input(u32 buttons, u32 held)
 {
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
@@ -1304,6 +1304,7 @@ int main(int argc, char **argv) {
 	while (!s_quit_requested) {
 		WPAD_ScanPads();
 		u32 pressed = WPAD_ButtonsDown(0);
+		u32 held = WPAD_ButtonsHeld(0);
 		if (pressed & WPAD_BUTTON_HOME)
             s_quit_requested = true;
 
@@ -1317,7 +1318,7 @@ int main(int argc, char **argv) {
 
         const ScreenMethods *screen = current_screen();
         screen->draw();
-        if (screen->process_input) screen->process_input(pressed);
+        if (screen->process_input) screen->process_input(pressed, held);
 
 		VIDEO_WaitVSync();
         frames_since_last_refresh++;
