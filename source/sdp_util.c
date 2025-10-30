@@ -812,6 +812,7 @@ uint8_t* sdp_service_search_pattern_for_uuid128(const uint8_t * uuid128){
 
 
 #include "bluetooth_sdp.h"
+#include "report_item.h"
 typedef enum {
     SDP_TYPE_ANY = 0,
     SDP_TYPE_BOOL,
@@ -833,6 +834,7 @@ typedef enum {
     SDP_PROF_DESC_LIST,
     SDP_HID_DESC_LIST,
     SDP_HID_DESC_REPORT,
+    SDP_HID_LANGUAGE_LIST,
     SDP_LANGUAGE_LIST,
     SDP_ATTR_LIST,
     SDP_TYPE_LAST
@@ -877,7 +879,7 @@ static const SdpAttribute s_sdp_hid_attributes[] = {
     { 0x0204, "HIDVirtualCable", SDP_TYPE_BOOL },
     { 0x0205, "HIDReconnectInitiate", SDP_TYPE_BOOL },
     { 0x0206, "HIDDescriptorList", SDP_HID_DESC_LIST },
-    { 0x0207, "HIDLANGIDBaseList", SDP_LANGUAGE_LIST },
+    { 0x0207, "HIDLANGIDBaseList", SDP_HID_LANGUAGE_LIST },
     { 0x0208, "HIDSDPDisable", SDP_TYPE_BOOL },
     { 0x0209, "HIDBatteryPower", SDP_TYPE_BOOL },
     { 0x020A, "HIDRemoteWake", SDP_TYPE_BOOL },
@@ -1385,6 +1387,14 @@ static void sdp_print_hid_desc_list(SdpContext *context, SdpAttributeValueType t
     de_traverse_sequence(element, sdp_print_hid_desc_cb, context);
 }
 
+static void ri_print_cb(const char *text, void *my_context)
+{
+    SdpContext *context = my_context;
+    if (vis()) printf("\n");
+    s_dump_row++;
+    if (vis()) { indent(context); printf("%s", text); }
+}
+
 static void sdp_print_hid_desc_report(SdpContext *context, SdpAttributeValueType t,
                                       const uint8_t *element)
 {
@@ -1399,19 +1409,53 @@ static void sdp_print_hid_desc_report(SdpContext *context, SdpAttributeValueType
     int len = (size == DE_SIZE_VAR_8) ?
         element[1] : big_endian_read_16(element, 1);
 
-    for (int i = 0; i < len; i++) {
-        uint8_t byte = element[pos + i];
-        if (i % 20 == 0) {
-            if (vis()) printf("\n");
-            s_dump_row++;
-        }
-        if (vis()) {
-            if (i % 20 == 0) {
-                indent(context);
-            }
-            printf(" %02x", byte);
-        }
+    ri_Parse(element + pos, len, ri_print_cb, context);
+}
+
+static int sdp_print_hid_language_list_cb2(const uint8_t *element,
+                                           de_type_t type, de_size_t size,
+                                           void *my_context)
+{
+    SdpContext *context = my_context;
+    sdp_print_element(context, context->expected_type, element);
+    if (vis()) printf(" ");
+    context->sequence_index++;
+    return 0;
+}
+
+static int sdp_print_hid_language_list_cb(const uint8_t *element,
+                                          de_type_t type, de_size_t size,
+                                          void *my_context)
+{
+    SdpContext *context = my_context;
+
+    if (type != DE_DES) {
+        sdp_print_generic(context, SDP_TYPE_ANY, element);
+        return 0;
     }
+
+    if (vis()) { printf("\n"); }
+    s_dump_row++;
+    if (vis()) { indent(context); printf("- "); }
+    context->sequence_index = 0;
+    context->indent++;
+    context->expected_type = SDP_TYPE_HEX16;
+    de_traverse_sequence(element, sdp_print_hid_language_list_cb2, context);
+    context->indent--;
+    return 0;
+}
+
+static void sdp_print_hid_language_list(SdpContext *context, SdpAttributeValueType t,
+                                        const uint8_t *element)
+{
+    de_type_t type = de_get_element_type(element);
+    if (type != DE_DES) {
+        sdp_print_generic(context, t, element);
+        return;
+    }
+
+    context->sequence_index = 0;
+    de_traverse_sequence(element, sdp_print_hid_language_list_cb, context);
 }
 
 static int sdp_print_language_list_cb(const uint8_t *element,
@@ -1460,6 +1504,8 @@ static int sdp_print_attr_list_cb(const uint8_t *element,
 
     if (context->is_attribute) {
         if (type == DE_DES) {
+            if (vis()) { indent(context); printf("Attribute list:\n"); }
+            s_dump_row++;
             context->indent++;
             de_traverse_sequence(element, sdp_print_attr_list_cb, context);
             context->indent--;
@@ -1509,6 +1555,7 @@ static const SdpPrintFunc s_sdp_print_funcs[] = {
     [SDP_PROF_DESC_LIST] = sdp_print_prof_desc_list,
     [SDP_HID_DESC_LIST] = sdp_print_hid_desc_list,
     [SDP_HID_DESC_REPORT] = sdp_print_hid_desc_report,
+    [SDP_HID_LANGUAGE_LIST] = sdp_print_hid_language_list,
     [SDP_LANGUAGE_LIST] = sdp_print_language_list,
     [SDP_ATTR_LIST] = sdp_print_attr_list,
 };
