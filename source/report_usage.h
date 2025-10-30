@@ -984,7 +984,7 @@
 extern "C" {
 #endif
 
-int8_t *ri_Usage(int32_t usagePage, int32_t usage);
+const char *ri_Usage(int32_t usagePage, int32_t usage);
 
 #ifdef __cplusplus
 }

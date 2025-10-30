@@ -1,6 +1,8 @@
 #ifndef _REPORT_ITEM_H
 #define _REPORT_ITEM_H
 
+#include <stdint.h>
+
 /* 注意：只对短条目进行解析（Short Item）
 */
 
@@ -165,19 +167,14 @@
 //Reversed 0x92U~0xFEFFU
 //Vendor-defined 0xFF00U~0xFFFFU
 
-#define LOG         printf
+#ifdef RI_DEBUG
 #define LOGD        printf
 #define LOGW        printf
 #define LOGE        printf
-
-#ifndef uint8_t
-typedef unsigned char       uint8_t;
-typedef unsigned short      uint16_t;
-typedef unsigned int        uint32_t;
-typedef char                int8_t;
-typedef short               int16_t;
-typedef int                 int32_t;
-typedef long long           int64_t;
+#else
+#define LOGD(x)
+#define LOGW(x)        LOGD(x)
+#define LOGE(x)        LOGD(x)
 #endif
 
 #endif //_REPORT_ITEM_H

@@ -171,14 +171,14 @@ const char *ri_UsagePage(int32_t itemData)
     }
 }
 
-int32_t ri_GetItemData(uint8_t *itemData, uint8_t size)
+int32_t ri_GetItemData(const uint8_t *itemData, uint8_t size)
 {
     if(size == 1)
         return *itemData;
     else if(size == 2)
-        return *((int16_t *)itemData);
+        return itemData[0] | (itemData[1] << 8);
     else if(size == 4)
-        return *((int32_t *)itemData);
+        return  itemData[0] | (itemData[1] << 8) | (itemData[2] << 16) | (itemData[3] << 24);
 
     return 0;
 }
