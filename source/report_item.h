@@ -177,4 +177,7 @@
 #define LOGE(x)        LOGD(x)
 #endif
 
+typedef void (*PrintFunc)(const char *output, void *context);
+int ri_Parse(const uint8_t *buf, uint16_t len, PrintFunc print_func, void *context);
+
 #endif //_REPORT_ITEM_H

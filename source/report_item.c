@@ -17,6 +17,9 @@
 
 #define ri_ItemSize(sizeMask)      ((uint8_t)(sizeMask) == Size_4B?4:(uint8_t)(sizeMask))
 
+static PrintFunc s_print_func = NULL;
+static void *s_context = NULL;
+
 const char *ri_ColletionType(uint8_t itemData)
 {
     static const char *colType[] = {
@@ -105,7 +108,7 @@ void  ri_MainItem(uint8_t itemTag, int32_t itemData, uint8_t *pspace)
         index += ri_StringGet(str + index, "Unknown Item: %02X", itemTag);
         break;
     }
-    LOG("%s\r\n", str);
+    s_print_func(str, s_context);
 }
 
 const char *ri_UsagePage(int32_t itemData)
@@ -299,7 +302,7 @@ void ri_GlobalItem(uint8_t itemTag, int32_t itemData, uint8_t space, int32_t *pU
         break;
     }
 
-    LOG("%s\r\n", str);
+    s_print_func(str, s_context);
 }
 
 #define ri_DelimiterItem(itemData)  (((int32_t)itemData)? \
@@ -354,13 +357,17 @@ void ri_LocalItem(uint8_t itemTag, int32_t itemData, uint8_t space, int32_t usag
         break;
     }
 
-    LOG("%s\r\n", str);
+    s_print_func(str, s_context);
 }
 
-int ri_Parse(uint8_t *buf, uint16_t len)
+int ri_Parse(const uint8_t *buf, uint16_t len,
+             PrintFunc print_func, void *context)
 {
     uint8_t space = 0;
     uint16_t index = 0;
+
+    s_print_func = print_func;
+    s_context = context;
     LOGD("Report Item Parse:\r\n");
     while(index < len)
     {
@@ -389,7 +396,11 @@ int ri_Parse(uint8_t *buf, uint16_t len)
             ri_LocalItem(itemTag, itemData, space, sUsagePage);
             break;
         default:
-            LOG("Unknown Type: %02X, index: %d\r\n", itemTag, index);
+            {
+                char buffer[128];
+                snprintf(buffer, sizeof(buffer), "Unknown Type: %02X, index: %d", itemTag, index);
+                s_print_func(buffer, s_context);
+            }
             break;
         }
         index += (itemSize + 1);
