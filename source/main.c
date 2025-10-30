@@ -1282,8 +1282,8 @@ static const ScreenMethods *current_screen()
 
 int main(int argc, char **argv) {
 
-	VIDEO_Init();
-	WPAD_Init();
+    VIDEO_Init();
+    WPAD_Init();
 
     static GXRModeObj *rmode;
     static void *xfb;
@@ -1301,11 +1301,11 @@ int main(int argc, char **argv) {
     CON_GetMetrics(&s_screen_w, &s_screen_h);
 
     int frames_since_last_refresh = 0;
-	while (!s_quit_requested) {
-		WPAD_ScanPads();
-		u32 pressed = WPAD_ButtonsDown(0);
-		u32 held = WPAD_ButtonsHeld(0);
-		if (pressed & WPAD_BUTTON_HOME)
+    while (!s_quit_requested) {
+        WPAD_ScanPads();
+        u32 pressed = WPAD_ButtonsDown(0);
+        u32 held = WPAD_ButtonsHeld(0);
+        if (pressed & WPAD_BUTTON_HOME)
             s_quit_requested = true;
 
         const ScreenMethods *screen = current_screen();
@@ -1320,9 +1320,9 @@ int main(int argc, char **argv) {
         }
         if (screen->process_input) screen->process_input(pressed, held);
 
-		VIDEO_WaitVSync();
+        VIDEO_WaitVSync();
         frames_since_last_refresh++;
-	}
+    }
 
-	return EXIT_SUCCESS;
+    return EXIT_SUCCESS;
 }
