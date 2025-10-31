@@ -119,6 +119,7 @@ static DeviceData s_device_data;
 static uint16_t s_sdp_transaction_id = 0;
 static uint8_t s_sdp_continuation_len = 0;
 static uint8_t s_sdp_continuation_code[16];
+static bool s_sdp_dump_raw = false;
 
 static const ActionItem s_device_actions[] = {
     { SCREEN_CONNECT, "Connect", },
@@ -938,21 +939,11 @@ static void screen_sdp_draw()
                data->sdp_num_responses, s_sdp_continuation_len);
     } else if (data->conn_status == CONN_STATUS_SDP_BROWSE_COMPLETE) {
         printf("Got response, size = %d\n", data->sdp_response_len);
-        if (data->sdp_response_len > 0) { // TODO keep only this branch
+        if (s_sdp_dump_raw) {
+            printf("Got response size %d\n", data->sdp_response_len);
             de_dump_data_element(data->sdp_response, data->current_row, 18);
         } else {
-            int written = 0;
-            for (int i = 0; i < 20 && written < data->sdp_response_len; i++) {
-                char input[16];
-                memset(input, 0, sizeof(input));
-                int row_len = data->sdp_response_len - written;
-                if (row_len > sizeof(input)) {
-                    row_len = sizeof(input);
-                }
-                memcpy(input, data->sdp_response + written, row_len);
-                print_row_data(input, sizeof(input));
-                written += row_len;
-            }
+            sdp_print_attribute_list(data->sdp_response, data->current_row, 19);
         }
     }
 
@@ -966,6 +957,9 @@ static void screen_sdp_process_input(u32 buttons, u32 held)
     DeviceData *data = &s_device_data;
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
+    } else if (buttons & WPAD_BUTTON_A) {
+        queue_refresh();
+        s_sdp_dump_raw = !s_sdp_dump_raw;
     } else if ((buttons | held) & WPAD_BUTTON_LEFT) {
         queue_refresh();
         data->current_row++;
@@ -1118,9 +1112,12 @@ static void screen_sdp_hid_draw()
             print_data(data->sdp_response, data->sdp_response_len);
         }
     } else if (data->conn_status == CONN_STATUS_SDP_HID_ATTRIBUTES) {
-        printf("Got response size %d\n", data->sdp_response_len);
-        //print_data(data->sdp_response, data->sdp_response_len);
-        de_dump_data_element(data->sdp_response, data->current_row, 18);
+        if (s_sdp_dump_raw) {
+            printf("Got response size %d\n", data->sdp_response_len);
+            de_dump_data_element(data->sdp_response, data->current_row, 18);
+        } else {
+            sdp_print_attribute_list(data->sdp_response, data->current_row, 19);
+        }
     } else if (data->conn_status == CONN_STATUS_NULL_RESPONSE) {
         printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
         printf("Got an empty response\n");
@@ -1136,10 +1133,13 @@ static void screen_sdp_hid_process_input(u32 buttons, u32 held)
     DeviceData *data = &s_device_data;
     if (buttons & WPAD_BUTTON_1) {
         pop_screen();
-    } else if (buttons & WPAD_BUTTON_LEFT) {
+    } else if (buttons & WPAD_BUTTON_A) {
+        queue_refresh();
+        s_sdp_dump_raw = !s_sdp_dump_raw;
+    } else if ((buttons | held) & WPAD_BUTTON_LEFT) {
         queue_refresh();
         data->current_row++;
-    } else if (buttons & WPAD_BUTTON_RIGHT) {
+    } else if ((buttons | held) & WPAD_BUTTON_RIGHT) {
         if (data->current_row > 0) {
             queue_refresh();
             data->current_row--;
