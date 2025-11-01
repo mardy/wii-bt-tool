@@ -29,9 +29,15 @@ typedef struct {
     struct l2cap_pcb *pcb;
 } ConnectData;
 
+typedef struct {
+    BtConnectionRequestCb callback;
+    void *cb_data;
+} ConnectionRequestData;
+
 static ScanData s_scan_data;
 static ReadRemoteNameData s_read_remote_name_data;
 static ConnectData s_connect_data;
+static ConnectionRequestData s_connection_request_data;
 static BtDeviceAddr s_bt_devices[MAX_SCAN_RESULTS];
 
 static err_t inquiry_cb(void *arg, struct hci_pcb *pcb, struct hci_inq_res *ires, u16_t result)
@@ -204,4 +210,40 @@ void bt_connect(const u8 *device_addr,
                      allow_role_switch ? HCI_ALLOW_ROLE_SWITCH : 0,
                      connect_cb);
     _CPU_ISR_Restore(level);
+}
+
+static err_t connection_request_cb(void *arg, struct bd_addr *bdaddr,
+                                   u8_t *cod, u8_t link_type)
+{
+    BtConnectionRequestData data;
+    u32 level;
+
+    memcpy(data.bdaddr, bdaddr, sizeof(data.bdaddr));
+    data.device_class[0] = cod[0];
+    data.device_class[1] = cod[1];
+    data.device_class[2] = cod[2];
+    data.link_type = link_type;
+    _CPU_ISR_Disable(level);
+    bool accept = s_connection_request_data.callback(
+        &data, s_connection_request_data.cb_data);
+    _CPU_ISR_Restore(level);
+    return accept ? ERR_OK : ERR_CONN;
+}
+
+void bt_on_connection_request(BtConnectionRequestCb callback,
+                              void *cb_data)
+{
+    s_connection_request_data.callback = callback;
+    s_connection_request_data.cb_data = cb_data;
+    hci_conn_req(connection_request_cb);
+}
+
+void bt_set_visible(BtVisibilityType type)
+{
+    hci_write_scan_enable((u8)type);
+}
+
+void bt_set_local_name(const char *name)
+{
+    hci_write_local_name((u8*)name, strlen(name) + 1);
 }

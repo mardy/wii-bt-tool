@@ -20,6 +20,7 @@ typedef enum {
     SCREEN_PAIRED_DEVICES,
     SCREEN_GUEST_DEVICES,
     SCREEN_SEARCH_DEVICES,
+    SCREEN_LISTEN,
     SCREEN_DEVICE,
     SCREEN_CONNECT,
     SCREEN_SDP,
@@ -58,6 +59,7 @@ static const ActionItem s_title_screen_items[] = {
     { SCREEN_PAIRED_DEVICES, "See paired devices", },
     { SCREEN_GUEST_DEVICES, "See guest devices", },
     { SCREEN_SEARCH_DEVICES, "Search nearby devices", },
+    { SCREEN_LISTEN, "Listen for events", },
     { ACTION_QUIT, "Quit", },
 };
 #define TITLE_NUM_SCREENS \
@@ -89,6 +91,12 @@ static SearchDeviceData s_search_device_data = {
     0,
 };
 
+#define MAX_CONNECTION_REQUESTS 8
+typedef struct {
+    BtConnectionRequestData requests[MAX_CONNECTION_REQUESTS];
+    int num_requests;
+} ListenData;
+
 typedef enum {
     CONN_STATUS_DISCONNECTED = 0,
     CONN_STATUS_CONNECTING,
@@ -116,6 +124,7 @@ typedef struct {
 } DeviceData;
 
 static DeviceData s_device_data;
+static ListenData s_listen_data;
 static uint16_t s_sdp_transaction_id = 0;
 static uint8_t s_sdp_continuation_len = 0;
 static uint8_t s_sdp_continuation_code[16];
@@ -514,6 +523,70 @@ static void screen_search_devices_process_input(u32 buttons, u32 held)
             queue_refresh();
             data->item_index--;
         }
+    }
+}
+
+static bool connection_request_cb(const BtConnectionRequestData *event,
+                                  void *cb_data)
+{
+    ListenData *data = cb_data;
+
+    if (data->num_requests >= MAX_CONNECTION_REQUESTS)
+        return false;
+
+    memcpy(&data->requests[data->num_requests++], event, sizeof(*event));
+    queue_refresh();
+    return true;
+}
+
+static void screen_listen_reset()
+{
+    ListenData *data = &s_listen_data;
+    memset(data, 0, sizeof(*data));
+
+    bt_on_connection_request(connection_request_cb, data);
+    bt_set_local_name("Wii");
+    bt_set_visible(BT_VISIBILITY_ALL);
+    set_animating(true);
+}
+
+static void screen_listen_draw()
+{
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    printf("LISTENING FOR EVENT");
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    const ListenData *data = &s_listen_data;
+
+    char anim_char = get_anim_char();
+
+    printf("Got %d requests\n\n", data->num_requests);
+
+    for (int i = 0; i < data->num_requests; i++) {
+        const BtConnectionRequestData *req = &data->requests[i];
+
+        char addr_buffer[20];
+        sprintf_bdaddr(addr_buffer, req->bdaddr);
+
+        const char *class_desc = describe_device(req->device_class[0],
+                                                 req->device_class[1]);
+        printf("% 2d) %s - (%s), link type: %02x\n", i + 1,
+               addr_buffer, class_desc, req->link_type);
+    }
+
+    printf("\nListening... %c\n", anim_char);
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_listen_process_input(u32 buttons, u32 held)
+{
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
     }
 }
 
@@ -1245,6 +1318,11 @@ static const ScreenMethods s_screens[SCREEN_LAST] = {
         screen_search_devices_reset,
         screen_search_devices_draw,
         screen_search_devices_process_input,
+    },
+    [SCREEN_LISTEN] = {
+        screen_listen_reset,
+        screen_listen_draw,
+        screen_listen_process_input,
     },
     [SCREEN_DEVICE] = {
         screen_device_reset,
