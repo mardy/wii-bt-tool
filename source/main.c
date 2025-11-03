@@ -26,6 +26,7 @@ typedef enum {
     SCREEN_SDP,
     SCREEN_SDP_HID,
     SCREEN_HID,
+    SCREEN_PAIR,
     SCREEN_LAST,
 } ScreenId;
 
@@ -121,6 +122,11 @@ typedef struct {
     uint16_t sdp_num_services;
     uint32_t sdp_hid_service_id;
     int sdp_response_len;
+    int num_link_key_requests;
+    int num_link_key_notifications;
+    int num_pin_code_requests;
+    int num_authentication_completes;
+    uint8_t link_key[16];
 } DeviceData;
 
 static DeviceData s_device_data;
@@ -135,6 +141,7 @@ static const ActionItem s_device_actions[] = {
     { SCREEN_SDP, "Read SDP data", },
     { SCREEN_SDP_HID, "Read SDP HID data", },
     { SCREEN_HID, "Run HID test", },
+    { SCREEN_PAIR, "Pair device", },
 };
 #define DEVICE_NUM_ACTIONS \
     (sizeof(s_device_actions) / sizeof(s_device_actions[0]))
@@ -1298,6 +1305,131 @@ static void screen_hid_process_input(u32 buttons, u32 held)
     }
 }
 
+static void link_key_request_cb(const BtLinkKeyRequestData *event,
+                                void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    queue_refresh();
+    data->num_link_key_requests++;
+    bt_link_key_reply(&event->address, NULL);
+}
+
+static void link_key_notification_cb(const BtLinkKeyNotificationData *event,
+                                     void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    queue_refresh();
+    memcpy(data->link_key, event->key, sizeof(data->link_key));
+    data->num_link_key_notifications++;
+}
+
+static void pin_code_request_cb(const BtPinCodeRequestData *event,
+                                void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    queue_refresh();
+    data->num_pin_code_requests++;
+    bt_pin_code_reply(&event->address, NULL);
+}
+
+static void authentication_complete_cb(const BtAuthenticationCompleteData *event,
+                                       void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    queue_refresh();
+    data->num_authentication_completes++;
+}
+
+static void pair_connect_cb(const BtConnectResult *result, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    queue_refresh();
+
+    data->error_code = result->error_code;
+    data->l2cap_status = result->status;
+    if (result->error_code == 0) {
+        data->conn_status = CONN_STATUS_CONNECTED;
+    } else {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+        set_animating(false);
+        return;
+    }
+    data->sdp_handle = result->handle;
+    //bt_request_authentication((BtAddress*)data->device.bdaddr);
+}
+
+static void screen_pair_reset()
+{
+    DeviceData *data = &s_device_data;
+
+    data->error_code = 0;
+    data->l2cap_status = 0;
+    data->num_link_key_requests = 0;
+    data->num_pin_code_requests = 0;
+    data->num_link_key_notifications = 0;
+    data->num_authentication_completes = 0;
+    data->conn_status = CONN_STATUS_CONNECTING;
+    set_animating(true);
+    bt_on_link_key_request(link_key_request_cb, data);
+    bt_on_link_key_notification(link_key_notification_cb, data);
+    bt_on_pin_code_request(pin_code_request_cb, data);
+    bt_on_authentication_complete(authentication_complete_cb, data);
+
+    bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
+               pair_connect_cb, data);
+}
+
+static void screen_pair_draw()
+{
+    const DeviceData *data = &s_device_data;
+
+    printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
+    char bdaddr[20];
+    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    printf("HID for %s - %.64s", bdaddr, data->device.name);
+
+    printf(CONSOLE_WHITE);
+    printf("\x1b[4;0H");
+
+    char anim_char = get_anim_char();
+
+    if (data->conn_status == CONN_STATUS_CONNECTING) {
+        printf("Connecting... %c\n", anim_char);
+    } else {
+        printf("%s      \n", data->conn_status == CONN_STATUS_CONNECTED ?
+               "Connecting" : "Connected");
+        printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
+    }
+
+    printf("Link key requested: %d\n", data->num_link_key_requests);
+    printf("PIN code requested: %d\n", data->num_pin_code_requests);
+    printf("Link keys received: %d\n", data->num_link_key_notifications);
+    for (int i = 0; i < data->num_link_key_notifications; i++) {
+        const uint8_t *k = data->link_key;
+        printf("  %02x %02x %02x %02x %02x %02x %02x %02x\n"
+               "  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7],
+               k[8], k[9], k[10], k[11], k[12], k[13], k[14], k[15]);
+    }
+    printf("Authentication complete: %d\n", data->num_authentication_completes);
+
+    printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
+    printf("_________________________________\n");
+    printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
+}
+
+static void screen_pair_process_input(u32 buttons, u32 held)
+{
+    if (buttons & WPAD_BUTTON_1) {
+        pop_screen();
+    }
+}
+
 static const ScreenMethods s_screens[SCREEN_LAST] = {
     [SCREEN_TITLE] = {
         NULL,
@@ -1350,6 +1482,11 @@ static const ScreenMethods s_screens[SCREEN_LAST] = {
         screen_hid_reset,
         screen_hid_draw,
         screen_hid_process_input,
+    },
+    [SCREEN_PAIR] = {
+        screen_pair_reset,
+        screen_pair_draw,
+        screen_pair_process_input,
     },
 };
 

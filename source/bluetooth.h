@@ -11,6 +11,10 @@
 #define BT_PSM_HID_INTR 0x0013
 
 typedef struct {
+    u8 bytes[6];
+} BtAddress;
+
+typedef struct {
     u8 bdaddr[6];
     u8 class_major;
     u8 class_minor;
@@ -65,6 +69,43 @@ typedef enum {
 
 void bt_set_visible(BtVisibilityType type);
 void bt_set_local_name(const char *name);
+
+typedef struct {
+    BtAddress address;
+} BtLinkKeyRequestData;
+
+typedef void (*BtLinkKeyRequestCb)(const BtLinkKeyRequestData *event,
+                                   void *cb_data);
+void bt_on_link_key_request(BtLinkKeyRequestCb callback, void *cb_data);
+void bt_link_key_reply(const BtAddress *address, const u8 *key);
+
+typedef struct {
+    BtAddress address;
+    u8 key[16];
+} BtLinkKeyNotificationData;
+
+typedef void (*BtLinkKeyNotificationCb)(const BtLinkKeyNotificationData *event,
+                                        void *cb_data);
+void bt_on_link_key_notification(BtLinkKeyNotificationCb callback, void *cb_data);
+
+typedef struct {
+    BtAddress address;
+} BtPinCodeRequestData;
+
+typedef void (*BtPinCodeRequestCb)(const BtPinCodeRequestData *event,
+                                   void *cb_data);
+void bt_on_pin_code_request(BtPinCodeRequestCb callback, void *cb_data);
+void bt_pin_code_reply(const BtAddress *address, const char *pin);
+
+void bt_request_authentication(const BtAddress *address);
+
+typedef struct {
+    BtAddress address;
+} BtAuthenticationCompleteData;
+
+typedef void (*BtAuthenticationCompleteCb)(const BtAuthenticationCompleteData *event,
+                                           void *cb_data);
+void bt_on_authentication_complete(BtAuthenticationCompleteCb callback, void *cb_data);
 
 typedef void (*BtL2capNotify)(BtL2capHandle *handle, void *data, size_t len,
                               void *cb_data);

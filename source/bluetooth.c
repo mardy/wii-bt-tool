@@ -34,10 +34,34 @@ typedef struct {
     void *cb_data;
 } ConnectionRequestData;
 
+typedef struct {
+    BtLinkKeyRequestCb callback;
+    void *cb_data;
+} LinkKeyRequestData;
+
+typedef struct {
+    BtLinkKeyNotificationCb callback;
+    void *cb_data;
+} LinkKeyNotificationData;
+
+typedef struct {
+    BtPinCodeRequestCb callback;
+    void *cb_data;
+} PinCodeRequestData;
+
+typedef struct {
+    BtAuthenticationCompleteCb callback;
+    void *cb_data;
+} AuthenticationCompleteData;
+
 static ScanData s_scan_data;
 static ReadRemoteNameData s_read_remote_name_data;
 static ConnectData s_connect_data;
 static ConnectionRequestData s_connection_request_data;
+static LinkKeyRequestData s_link_key_request_data;
+static LinkKeyNotificationData s_link_key_notification_data;
+static PinCodeRequestData s_pin_code_request_data;
+static AuthenticationCompleteData s_authentication_complete_data;
 static BtDeviceAddr s_bt_devices[MAX_SCAN_RESULTS];
 
 static err_t inquiry_cb(void *arg, struct hci_pcb *pcb, struct hci_inq_res *ires, u16_t result)
@@ -246,4 +270,102 @@ void bt_set_visible(BtVisibilityType type)
 void bt_set_local_name(const char *name)
 {
     hci_write_local_name((u8*)name, strlen(name) + 1);
+}
+
+static err_t link_key_request_cb(void *arg, struct bd_addr *bdaddr)
+{
+    u32 level;
+
+    _CPU_ISR_Disable(level);
+    s_link_key_request_data.callback((BtLinkKeyRequestData*)bdaddr,
+                                     s_link_key_request_data.cb_data);
+    _CPU_ISR_Restore(level);
+    return ERR_OK;
+}
+
+void bt_on_link_key_request(BtLinkKeyRequestCb callback, void *cb_data)
+{
+    s_link_key_request_data.callback = callback;
+    s_link_key_request_data.cb_data = cb_data;
+    hci_link_key_req(link_key_request_cb);
+}
+
+static err_t link_key_notification_cb(void *arg, struct bd_addr *bdaddr, u8_t *key)
+{
+    BtLinkKeyNotificationData event;
+    u32 level;
+
+    memcpy(&event.address, bdaddr, sizeof(event.address));
+    memcpy(&event.key, key, sizeof(event.key));
+    _CPU_ISR_Disable(level);
+    s_link_key_notification_data.callback(&event,
+                                          s_link_key_notification_data.cb_data);
+    _CPU_ISR_Restore(level);
+    return ERR_OK;
+}
+
+void bt_on_link_key_notification(BtLinkKeyNotificationCb callback, void *cb_data)
+{
+    s_link_key_notification_data.callback = callback;
+    s_link_key_notification_data.cb_data = cb_data;
+    hci_link_key_not(link_key_notification_cb);
+}
+
+void bt_link_key_reply(const BtAddress *address, const u8 *key)
+{
+    if (key) {
+        hci_link_key_req_reply((struct bd_addr *)address, (u8*)key);
+    } else {
+        hci_link_key_req_neg_reply((struct bd_addr *)address);
+    }
+}
+
+static err_t pin_code_request_cb(void *arg, struct bd_addr *bdaddr)
+{
+    u32 level;
+
+    _CPU_ISR_Disable(level);
+    s_pin_code_request_data.callback((BtPinCodeRequestData*)bdaddr,
+                                     s_pin_code_request_data.cb_data);
+    _CPU_ISR_Restore(level);
+    return ERR_OK;
+}
+
+void bt_on_pin_code_request(BtPinCodeRequestCb callback, void *cb_data)
+{
+    s_pin_code_request_data.callback = callback;
+    s_pin_code_request_data.cb_data = cb_data;
+    hci_pin_req(pin_code_request_cb);
+}
+
+void bt_pin_code_reply(const BtAddress *address, const char *pin)
+{
+    if (pin) {
+        hci_pin_code_request_reply((struct bd_addr *)address, strlen(pin), (u8*)pin);
+    } else {
+        hci_pin_code_request_neg_reply((struct bd_addr *)address);
+    }
+}
+
+void bt_request_authentication(const BtAddress *address)
+{
+    hci_auth_req((struct bd_addr *)address);
+}
+
+static err_t authentication_complete_cb(void *arg, struct bd_addr *bdaddr)
+{
+    u32 level;
+
+    _CPU_ISR_Disable(level);
+    s_authentication_complete_data.callback((BtAuthenticationCompleteData*)bdaddr,
+                                            s_authentication_complete_data.cb_data);
+    _CPU_ISR_Restore(level);
+    return ERR_OK;
+}
+
+void bt_on_authentication_complete(BtAuthenticationCompleteCb callback, void *cb_data)
+{
+    s_authentication_complete_data.callback = callback;
+    s_authentication_complete_data.cb_data = cb_data;
+    hci_auth_complete(authentication_complete_cb);
 }
