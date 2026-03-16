@@ -1,8 +1,10 @@
-#include "bluetooth.h"
-#include "bluetooth_sdp.h"
 #include "btstack_util.h"
 #include "sdp_util.h"
 
+#include <bt-embedded/client.h>
+#include <bt-embedded/hci.h>
+#include <bt-embedded/l2cap.h>
+#include <bt-embedded/services/sdp.h>
 #include <gccore.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -11,6 +13,11 @@
 #include <wiiuse/wpad.h>
 
 #define MAX_SEARCH_DEVICES 10
+
+#define BD_ADDR_FMT "%02x:%02x:%02x:%02x:%02x:%02x"
+#define BD_ADDR_DATA(b) \
+    (b)->bytes[5], (b)->bytes[4], (b)->bytes[3], \
+    (b)->bytes[2], (b)->bytes[1], (b)->bytes[0]
 
 static int s_screen_w, s_screen_h;
 static bool s_quit_requested = false;
@@ -68,9 +75,10 @@ static const ActionItem s_title_screen_items[] = {
 static int s_title_item_index = 0;
 
 typedef struct {
-    u8 bdaddr[6];
-    u8 class_major;
-    u8 class_minor;
+    BteBdAddr bdaddr;
+    BteClassOfDevice cod;
+    uint8_t page_scan_rep_mode;
+    uint16_t clock_offset;
     char name[0x40];
     bool querying_name;
     bool queried_name;
@@ -78,7 +86,7 @@ typedef struct {
 
 typedef struct {
     int item_index;
-    u32 lap;
+    BteLap lap;
     bool search_running;
     int error_code;
     int num_devices;
@@ -86,13 +94,19 @@ typedef struct {
 } SearchDeviceData;
 
 static SearchDeviceData s_search_device_data = {
-    BT_LAP_GIAC,
+    BTE_LAP_GIAC,
     false,
     0,
     0,
 };
 
 #define MAX_CONNECTION_REQUESTS 8
+typedef struct {
+    BteBdAddr address;
+    BteClassOfDevice cod;
+    BteLinkType link_type;
+} BtConnectionRequestData;
+
 typedef struct {
     BtConnectionRequestData requests[MAX_CONNECTION_REQUESTS];
     int num_requests;
@@ -102,8 +116,6 @@ typedef enum {
     CONN_STATUS_DISCONNECTED = 0,
     CONN_STATUS_CONNECTING,
     CONN_STATUS_CONNECTED,
-    CONN_STATUS_SDP_HID_SERVICE,
-    CONN_STATUS_SDP_HID_ATTRIBUTES,
     CONN_STATUS_SDP_BROWSE_COMPLETE,
     CONN_STATUS_NULL_RESPONSE,
 } ConnectionStatus;
@@ -115,9 +127,11 @@ typedef struct {
     ConnectionStatus conn_status;
     int error_code;
     int l2cap_status;
-    BtL2capHandle *sdp_handle;
+    char error_msg[128];
+    BteSdpClient *sdp_handle;
+    BteL2cap *hid_ctrl;
+    BteL2cap *hid_intr;
     bool has_pending_call;
-    int sdp_num_responses;
     uint8_t sdp_response[4096];
     uint16_t sdp_num_services;
     uint32_t sdp_hid_service_id;
@@ -131,10 +145,9 @@ typedef struct {
 
 static DeviceData s_device_data;
 static ListenData s_listen_data;
-static uint16_t s_sdp_transaction_id = 0;
-static uint8_t s_sdp_continuation_len = 0;
-static uint8_t s_sdp_continuation_code[16];
 static bool s_sdp_dump_raw = false;
+static BteClient *s_client = NULL;
+static bool s_hci_initialized = false;
 
 static const ActionItem s_device_actions[] = {
     { SCREEN_CONNECT, "Connect", },
@@ -159,11 +172,26 @@ static void set_animating(bool animating)
     s_screen_runs_animation = animating;
 }
 
-static int sprintf_bdaddr(char *dest, const u8 *bdaddr)
+static inline void bd_address_to_conf(const BteBdAddr *a, u8 *conf)
 {
-    return sprintf(dest, "%02x:%02x:%02x:%02x:%02x:%02x",
-                   bdaddr[0], bdaddr[1], bdaddr[2], bdaddr[3], bdaddr[4],
-                   bdaddr[5]);
+	const uint8_t *b = a->bytes;
+	conf[0] = b[5];
+	conf[1]	= b[4];
+	conf[2]	= b[3];
+	conf[3] = b[2];
+	conf[4] = b[1];
+	conf[5] = b[0];
+}
+
+static inline BteBdAddr bd_address_from_conf(const u8 *conf)
+{
+	BteBdAddr addr = {{ conf[5], conf[4], conf[3], conf[2], conf[1], conf[0] }};
+	return addr;
+}
+
+static int sprintf_bdaddr(char *dest, const BteBdAddr *bdaddr)
+{
+    return sprintf(dest,  BD_ADDR_FMT, BD_ADDR_DATA(bdaddr));
 }
 
 static void color_selected(bool selected)
@@ -173,8 +201,10 @@ static void color_selected(bool selected)
            selected);
 }
 
-static const char *describe_device(u8 major, u8 minor)
+static const char *describe_device(BteClassOfDevice cod)
 {
+    u8 major = bte_cod_get_major_dev_class(cod);
+    u8 minor = bte_cod_get_minor_dev_class(cod);
     switch (major) {
     case 0: return "Misc";
     case 1: return "Computer";
@@ -305,7 +335,8 @@ static void screen_paired_devices_draw()
         const conf_pad_device *device = &s_paired_devices.registered[i];
 
         char addr_buffer[20];
-        sprintf_bdaddr(addr_buffer, device->bdaddr);
+        BteBdAddr address = bd_address_from_conf(device->bdaddr);
+        sprintf_bdaddr(addr_buffer, &address);
         int color = is_active(device->bdaddr) ? 32 : 37;
         printf(CONSOLE_ESC(37;0m) "% 2d) \x1b[%d;1m%s - \"%.64s\"\n", i + 1, color, addr_buffer, device->name);
     }
@@ -341,9 +372,8 @@ static void screen_guest_devices_draw()
     for (int i = 0; i < s_guest_devices.num_guests; i++) {
         const conf_pad_guest_device *device = &s_guest_devices.guests[i];
 
-        char addr_buffer[20];
-        sprintf_bdaddr(addr_buffer, device->bdaddr);
-        printf("% 2d) %s - \"%.64s\"\n", i + 1, addr_buffer, device->name);
+        BteBdAddr address = bd_address_from_conf(device->bdaddr);
+        printf("% 2d) " BD_ADDR_FMT " - \"%.64s\"\n", i + 1, BD_ADDR_DATA(&address), device->name);
     }
 
     if (s_guest_devices.num_guests == 0)
@@ -365,7 +395,7 @@ static void screen_search_devices_reset()
 {
     SearchDeviceData *data = &s_search_device_data;
     memset(data, 0, sizeof(*data));
-    data->lap = BT_LAP_GIAC;
+    data->lap = BTE_LAP_GIAC;
 }
 
 static void screen_search_devices_draw()
@@ -377,7 +407,7 @@ static void screen_search_devices_draw()
     printf("\x1b[4;0H");
 
     const SearchDeviceData *data = &s_search_device_data;
-    const char *search_type = (data->lap == BT_LAP_GIAC) ? "General" : "Limited";
+    const char *search_type = (data->lap == BTE_LAP_GIAC) ? "General" : "Limited";
 
     char anim_char = get_anim_char();
 
@@ -395,7 +425,7 @@ static void screen_search_devices_draw()
             const DeviceEntry *device = &data->devices[i];
 
             char addr_buffer[20];
-            sprintf_bdaddr(addr_buffer, device->bdaddr);
+            sprintf_bdaddr(addr_buffer, &device->bdaddr);
 
             char text[100];
             if (device->queried_name) {
@@ -405,8 +435,7 @@ static void screen_search_devices_draw()
             } else {
                 sprintf(text, "Queued for name retrieval");
             }
-            const char *class_desc = describe_device(device->class_major,
-                                                     device->class_minor);
+            const char *class_desc = describe_device(device->cod);
             color_selected(data->item_index == i + 1);
             printf("% 2d) %s - (%s) %s\n", i + 1, addr_buffer, class_desc, text);
         }
@@ -425,23 +454,23 @@ static void screen_search_devices_draw()
     printf(CONSOLE_WHITE "A - " CONSOLE_RESET "Switch search type");
 }
 
-static bool device_in_list(const u8 *bdaddr, const DeviceEntry *devices, int num_devices)
+static bool device_in_list(const BteBdAddr *bdaddr, const DeviceEntry *devices, int num_devices)
 {
     for (int i = 0; i < num_devices; i++) {
-        if (memcmp(bdaddr, devices[i].bdaddr, 6) == 0)
+        if (memcmp(bdaddr, &devices[i].bdaddr, 6) == 0)
             return true;
     }
     return false;
 }
 
-static void on_name_retrieved(const BtReadRemoteNameResult *result, void *cb_data)
+static void on_name_retrieved(BteHci *hci, const BteHciReadRemoteNameReply *reply, void *cb_data)
 {
     SearchDeviceData *data = cb_data;
 
     for (int i = 0; i < data->num_devices; i++) {
         DeviceEntry *device = &data->devices[i];
         if (device->querying_name) {
-            memcpy(device->name, result->name, sizeof(device->name));
+            snprintf(device->name, sizeof(device->name), "%s", reply->name);
             device->queried_name = true;
             device->querying_name = false;
             break;
@@ -467,7 +496,11 @@ static void retrive_device_names(SearchDeviceData *data)
         if (!device->queried_name) {
             has_pending_operation = true;
             device->querying_name = true;
-            bt_read_remote_name(device->bdaddr, on_name_retrieved, data);
+            bte_hci_read_remote_name(bte_hci_get(s_client),
+                                     &device->bdaddr,
+                                     device->page_scan_rep_mode,
+                                     device->clock_offset,
+                                     NULL, on_name_retrieved, data);
             break;
         }
     }
@@ -475,24 +508,23 @@ static void retrive_device_names(SearchDeviceData *data)
     set_animating(has_pending_operation);
 }
 
-static void search_devices_cb(const BtScanResult *result, void *cb_data)
+static void search_devices_cb(BteHci *hci, const BteHciInquiryReply *reply, void *cb_data)
 {
     SearchDeviceData *data = cb_data;
-    data->error_code = result->error_code;
+    data->error_code = reply->status;
     int num_devices = 0;
-    data->num_devices = result->num_devices;
+    data->num_devices = reply->num_responses;
     if (data->num_devices > MAX_SEARCH_DEVICES)
         data->num_devices = MAX_SEARCH_DEVICES;
-    for (int i = 0; i < result->num_devices; i++) {
-        const u8 *bdaddr = result->devices[i].bdaddr;
+    for (int i = 0; i < reply->num_responses; i++) {
+        const BteBdAddr *bdaddr = &reply->responses[i].address;
         if (device_in_list(bdaddr, data->devices, num_devices)) {
             /* Duplicate, ignoring */
             continue;
         }
         memset(&data->devices[num_devices], 0, sizeof(data->devices[num_devices]));
-        memcpy(data->devices[num_devices].bdaddr, bdaddr, 6);
-        data->devices[num_devices].class_major = result->devices[i].class_major;
-        data->devices[num_devices].class_minor = result->devices[i].class_minor;
+        data->devices[num_devices].bdaddr = *bdaddr;
+        data->devices[num_devices].cod = reply->responses[i].class_of_device;
         num_devices++;
         if (num_devices >= MAX_SEARCH_DEVICES) break;
     }
@@ -512,14 +544,16 @@ static void screen_search_devices_process_input(u32 buttons, u32 held)
             data->search_running = true;
             set_animating(true);
             queue_refresh();
-            bt_scan(data->lap, search_devices_cb, data);
+            bte_hci_inquiry(bte_hci_get(s_client),
+                            data->lap, 3, MAX_SEARCH_DEVICES,
+                            NULL, search_devices_cb, data);
         } else {
             push_screen(SCREEN_DEVICE);
         }
     } else if (buttons & WPAD_BUTTON_A) {
         queue_refresh();
-        data->lap = (data->lap == BT_LAP_GIAC) ?
-            BT_LAP_LIAC : BT_LAP_GIAC;
+        data->lap = (data->lap == BTE_LAP_GIAC) ?
+            BTE_LAP_LIAC : BTE_LAP_GIAC;
     } else if (buttons & WPAD_BUTTON_LEFT) {
         if (data->item_index < data->num_devices) {
             queue_refresh();
@@ -533,7 +567,10 @@ static void screen_search_devices_process_input(u32 buttons, u32 held)
     }
 }
 
-static bool connection_request_cb(const BtConnectionRequestData *event,
+static bool connection_request_cb(BteHci *hci,
+                                  const BteBdAddr *address,
+                                  const BteClassOfDevice *cod,
+                                  BteLinkType link_type,
                                   void *cb_data)
 {
     ListenData *data = cb_data;
@@ -541,7 +578,12 @@ static bool connection_request_cb(const BtConnectionRequestData *event,
     if (data->num_requests >= MAX_CONNECTION_REQUESTS)
         return false;
 
-    memcpy(&data->requests[data->num_requests++], event, sizeof(*event));
+    BtConnectionRequestData event = {
+        *address,
+        *cod,
+        link_type,
+    };
+    memcpy(&data->requests[data->num_requests++], &event, sizeof(event));
     queue_refresh();
     return true;
 }
@@ -551,9 +593,11 @@ static void screen_listen_reset()
     ListenData *data = &s_listen_data;
     memset(data, 0, sizeof(*data));
 
-    bt_on_connection_request(connection_request_cb, data);
-    bt_set_local_name("Wii");
-    bt_set_visible(BT_VISIBILITY_ALL);
+    BteHci *hci = bte_hci_get(s_client);
+    bte_client_set_userdata(s_client, data);
+    bte_hci_on_connection_request(hci, connection_request_cb);
+    bte_hci_write_local_name(hci, "Wii", NULL, NULL);
+    bte_hci_write_scan_enable(hci, BTE_HCI_SCAN_ENABLE_INQ_PAGE, NULL, NULL);
     set_animating(true);
 }
 
@@ -575,10 +619,9 @@ static void screen_listen_draw()
         const BtConnectionRequestData *req = &data->requests[i];
 
         char addr_buffer[20];
-        sprintf_bdaddr(addr_buffer, req->bdaddr);
+        sprintf_bdaddr(addr_buffer, &req->address);
 
-        const char *class_desc = describe_device(req->device_class[0],
-                                                 req->device_class[1]);
+        const char *class_desc = describe_device(req->cod);
         printf("% 2d) %s - (%s), link type: %02x\n", i + 1,
                addr_buffer, class_desc, req->link_type);
     }
@@ -604,6 +647,7 @@ static void screen_device_reset()
 
     const SearchDeviceData *search_data = &s_search_device_data;
 
+    bte_client_set_userdata(s_client, data);
     memcpy(&data->device, &search_data->devices[search_data->item_index - 1],
            sizeof(data->device));
 }
@@ -614,7 +658,7 @@ static void screen_device_draw()
 
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
     char bdaddr[20];
-    sprintf_bdaddr(bdaddr, data->device.bdaddr);
+    sprintf_bdaddr(bdaddr, &data->device.bdaddr);
     printf("DEVICE %s - %.64s", bdaddr, data->device.name);
 
     printf(CONSOLE_WHITE);
@@ -656,17 +700,19 @@ static void screen_device_process_input(u32 buttons, u32 held)
     }
 }
 
-static void connect_cb(const BtConnectResult *result, void *cb_data)
+static void connect_cb(BteL2cap *l2cap, const BteL2capConnectionResponse *reply, void *cb_data)
 {
     DeviceData *data = cb_data;
 
-    if (result->error_code == 0) {
+    if (reply->result == BTE_L2CAP_CONN_RESP_RES_OK) {
         data->conn_status = CONN_STATUS_CONNECTED;
+    } else if (reply->result == BTE_L2CAP_CONN_RESP_RES_PENDING) {
+        /* TODO auth */
     } else {
         data->conn_status = CONN_STATUS_DISCONNECTED;
     }
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
+    data->error_code = reply->result;
+    data->l2cap_status = reply->status;
     set_animating(false);
 }
 
@@ -678,8 +724,10 @@ static void screen_connect_reset()
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
     set_animating(true);
-    bt_connect(data->device.bdaddr, true, BT_PSM_HID_CONTROL,
-               connect_cb, data);
+    bte_l2cap_new_outgoing(s_client, &data->device.bdaddr,
+                           BTE_L2CAP_PSM_HID_CTRL, NULL,
+                           BTE_L2CAP_CONNECT_FLAG_NONE,
+                           connect_cb, data);
 }
 
 static void screen_connect_draw()
@@ -687,9 +735,7 @@ static void screen_connect_draw()
     const DeviceData *data = &s_device_data;
 
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
-    char bdaddr[20];
-    sprintf_bdaddr(bdaddr, data->device.bdaddr);
-    printf("CONNECTION TO %s - %.64s", bdaddr, data->device.name);
+    printf("CONNECTION TO " BD_ADDR_FMT " - %.64s", BD_ADDR_DATA(&data->device.bdaddr), data->device.name);
 
     printf(CONSOLE_WHITE);
     printf("\x1b[4;0H");
@@ -716,246 +762,94 @@ static void screen_connect_process_input(u32 buttons, u32 held)
     }
 }
 
-static inline bool copy_response(const uint8_t *response, int size,
-                                 uint8_t *dest, int *dest_len, int dest_max_len)
-{
-    int available = dest_max_len - *dest_len;
-    bool did_fit = true;
-    if (size > available) {
-        size = available;
-        did_fit = false;
-    }
-    memcpy(dest + *dest_len, response, size);
-    *dest_len += size;
-    return did_fit;
-}
-
-/* Returns true if the response needs completion */
-static bool sdp_save_service_attribute(const uint8_t *response, int size,
-                                       uint8_t *dest, int *dest_len, int dest_max_len)
-{
-    int offset = 3; /* command ID + transaction ID */
-
-    if (offset + 2 + 2 > size) return false;  // parameterLength, attributeListByteCount
-
-    uint16_t parameter_length = big_endian_read_16(response, offset);
-    offset += 2;
-    if (offset + parameter_length > size) return false;
-
-    uint16_t attribute_list_size = big_endian_read_16(response, offset);
-    offset += 2;
-    if (!copy_response(response + offset, attribute_list_size,
-                       dest, dest_len, dest_max_len)) return false;
-    offset += attribute_list_size;
-    if (offset + 1 > size) return false; /* 1 byte for continuation state */
-
-    uint8_t continuation_len = response[offset++];
-    if (continuation_len == 0 ||
-        continuation_len > 16 ||
-        offset + continuation_len > size) return false;
-
-    memcpy(s_sdp_continuation_code, response + offset, continuation_len);
-    s_sdp_continuation_len = continuation_len;
-    return true;
-}
-
-static int sdp_build_service_search_req(uint8_t *buffer, uint16_t attribute)
-{
-    int len = 0;
-
-    buffer[len++] = SDP_ServiceSearchRequest;
-    big_endian_store_16(buffer, len, s_sdp_transaction_id++);
-    len += 2;
-
-    /* parameters length, we'll fill it later */
-    len += 2;
-
-    const uint8_t *search_pattern = sdp_service_search_pattern_for_uuid16(attribute);
-    uint16_t search_pattern_len = de_get_len(search_pattern);
-    memcpy(buffer + len, search_pattern, search_pattern_len);
-    len += search_pattern_len;
-
-    //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
-    big_endian_store_16(buffer, len, 0x3);
-    len += 2;
-
-    //     ContinuationState - uint8_t number of cont. bytes N<=16
-    buffer[len++] = 0;
-
-    // uint16_t paramLength
-    big_endian_store_16(buffer, 3, len - 5);
-    return len;
-}
-
-static int sdp_build_service_attribute_req(uint8_t *buffer,
-                                           uint32_t service_id,
-                                           uint16_t attribute)
-{
-    int len = 0;
-
-    buffer[len++] = SDP_ServiceAttributeRequest;
-    big_endian_store_16(buffer, len, s_sdp_transaction_id++);
-    len += 2;
-
-    /* parameters length, we'll fill it later */
-    len += 2;
-
-    big_endian_store_32(buffer, len, service_id);
-    len += 4;
-
-    //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
-    big_endian_store_16(buffer, len, 4096);
-    len += 2;
-
-    /* AttibuteIDList (all) */
-    static const uint8_t attribute_id_list[] = {0x35, 0x05, 0x0A, 0x00, 0x00, 0xff, 0xff};
-    uint16_t attribute_id_list_len = de_get_len(attribute_id_list);
-    memcpy(buffer + len, attribute_id_list, attribute_id_list_len);
-    len += attribute_id_list_len;
-
-    //     ContinuationState - uint8_t number of cont. bytes N<=16
-    buffer[len++] = s_sdp_continuation_len;
-    if (s_sdp_continuation_len > 0) {
-        memcpy(buffer + len, s_sdp_continuation_code, s_sdp_continuation_len);
-        len += s_sdp_continuation_len;
-    }
-
-    // uint16_t paramLength
-    big_endian_store_16(buffer, 3, len - 5);
-    return len;
-}
-
-/* Returns true if the response needs completion */
-static bool sdp_save_search_attribute(const uint8_t *response, int size,
-                                      uint8_t *dest, int *dest_len, int dest_max_len)
-{
-    int offset = 3; /* command ID + transaction ID */
-
-    if (offset + 2 + 2 > size) return false;  // parameterLength, attributeListByteCount
-
-    uint16_t parameter_length = big_endian_read_16(response, offset);
-    offset += 2;
-    if (offset + parameter_length > size) return false;
-
-    uint16_t attribute_list_size = big_endian_read_16(response, offset);
-    offset += 2;
-    if (!copy_response(response + offset, attribute_list_size,
-                       dest, dest_len, dest_max_len)) return false;
-    offset += attribute_list_size;
-    if (offset + 1 > size) return false; /* 1 byte for continuation state */
-
-    uint8_t continuation_len = response[offset++];
-    if (continuation_len == 0 ||
-        continuation_len > 16 ||
-        offset + continuation_len > size) return false;
-
-    memcpy(s_sdp_continuation_code, response + offset, continuation_len);
-    s_sdp_continuation_len = continuation_len;
-    return true;
-}
-
-static int sdp_build_search_attribute_req(uint8_t *buffer, uint16_t attribute)
-{
-    int len = 0;
-
-    buffer[len++] = SDP_ServiceSearchAttributeRequest;
-    big_endian_store_16(buffer, len, s_sdp_transaction_id++);
-    len += 2;
-
-    /* parameters length, we'll fill it later */
-    len += 2;
-
-    const uint8_t *search_pattern = sdp_service_search_pattern_for_uuid16(attribute);
-    uint16_t search_pattern_len = de_get_len(search_pattern);
-    memcpy(buffer + len, search_pattern, search_pattern_len);
-    len += search_pattern_len;
-
-    //     MaximumAttributeByteCount - uint16_t  0x0007 - 0xffff -> mtu
-    big_endian_store_16(buffer, len, 0xffff);
-    len += 2;
-
-    /* AttibuteIDList (all) */
-    static const uint8_t attribute_id_list[] = {0x35, 0x05, 0x0A, 0x00, 0x00, 0xff, 0xff};
-    uint16_t attribute_id_list_len = de_get_len(attribute_id_list);
-    memcpy(buffer + len, attribute_id_list, attribute_id_list_len);
-    len += attribute_id_list_len;
-
-    //     ContinuationState - uint8_t number of cont. bytes N<=16
-    buffer[len++] = s_sdp_continuation_len;
-    if (s_sdp_continuation_len > 0) {
-        memcpy(buffer + len, s_sdp_continuation_code, s_sdp_continuation_len);
-        len += s_sdp_continuation_len;
-    }
-
-    // uint16_t paramLength
-    big_endian_store_16(buffer, 3, len - 5);
-    return len;
-}
-
-static void sdp_got_message(BtL2capHandle *handle, void *msg, size_t len,
-                            void *cb_data)
+static void sdp_service_search_attr_cb(BteSdpClient *sdp, const BteSdpServiceAttrReply *reply,
+                                       void *cb_data)
 {
     DeviceData *data = cb_data;
 
-    queue_refresh();
-    data->sdp_num_responses++;
-
-    bool cont = sdp_save_search_attribute(msg, len,
-                                          data->sdp_response, &data->sdp_response_len,
-                                          sizeof(data->sdp_response));
-    if (cont) {
-        uint8_t buffer[256];
-        int len = sdp_build_search_attribute_req(buffer,
-                                  BLUETOOTH_PROTOCOL_L2CAP);
-        bt_l2cap_handle_write(handle, buffer, len);
-    } else {
+    if (reply->error_code) {
         data->has_pending_call = false;
         data->conn_status = CONN_STATUS_SDP_BROWSE_COMPLETE;
+        sprintf(data->error_msg, "Error reading attributes: %d", reply->error_code);
         set_animating(false);
+        queue_refresh();
+        return;
     }
+
+    uint32_t size = bte_sdp_de_get_total_size(reply->attr_list_de);
+    if (size > sizeof(data->sdp_response)) {
+        data->has_pending_call = false;
+        data->conn_status = CONN_STATUS_SDP_BROWSE_COMPLETE;
+        sprintf(data->error_msg, "Response too long: %u", size);
+        set_animating(false);
+        queue_refresh();
+        return;
+    }
+
+    memcpy(data->sdp_response, reply->attr_list_de, size);
+    data->has_pending_call = false;
+    data->conn_status = CONN_STATUS_SDP_BROWSE_COMPLETE;
+    set_animating(false);
+    queue_refresh();
 }
 
-static void sdp_connect_cb(const BtConnectResult *result, void *cb_data)
+static void sdp_connect_cb(BteL2cap *l2cap, const BteL2capNewConfiguredReply *reply, void *cb_data)
 {
     DeviceData *data = cb_data;
 
-    queue_refresh();
-
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
-    if (result->error_code == 0) {
+    data->error_code = reply->result;
+    if (data->error_code == 0) {
         data->conn_status = CONN_STATUS_CONNECTED;
     } else {
         data->conn_status = CONN_STATUS_DISCONNECTED;
         set_animating(false);
+        queue_refresh();
         return;
     }
-    BtL2capHandle *handle = data->sdp_handle = result->handle;
+    BteSdpClient *sdp = data->sdp_handle = bte_sdp_client_new(l2cap);
 
-    bt_l2cap_handle_notify(handle, sdp_got_message, data);
+    uint8_t pattern[32];
+    bte_sdp_de_write(pattern, sizeof(pattern),
+                     BTE_SDP_DE_TYPE_SEQUENCE,
+                     BTE_SDP_DE_TYPE_UUID16, BTE_SDP_PROTO_L2CAP,
+                     BTE_SDP_DE_END,
+                     BTE_SDP_DE_END);
+    uint8_t id_list[20];
+    bte_sdp_de_write(id_list, sizeof(id_list),
+                     BTE_SDP_DE_TYPE_SEQUENCE,
+                     BTE_SDP_DE_TYPE_UINT32, 0x0000ffff,
+                     BTE_SDP_DE_END,
+                     BTE_SDP_DE_END);
 
-    uint8_t buffer[256];
-    int len = sdp_build_search_attribute_req(buffer,
-                            BLUETOOTH_PROTOCOL_L2CAP);
-    bt_l2cap_handle_write(handle, buffer, len);
+    bool ok = bte_sdp_service_search_attr_req(sdp, pattern, 1000,
+                                              id_list, sdp_service_search_attr_cb, data);
+    if (!ok) {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+        sprintf(data->error_msg, "Failed to issue SDP request");
+        set_animating(false);
+    }
+    queue_refresh();
 }
 
 static void screen_sdp_reset()
 {
     DeviceData *data = &s_device_data;
 
-    s_sdp_continuation_len = 0;
-    s_sdp_transaction_id = 0;
     data->current_row = 0;
     data->error_code = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
-    data->sdp_num_responses = 0;
     data->sdp_response_len = 0;
+    data->error_msg[0] = 0;
+    if (data->sdp_handle) {
+        bte_sdp_client_unref(data->sdp_handle);
+        data->sdp_handle = NULL;
+    }
     data->has_pending_call = true;
     set_animating(true);
-    bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
-               sdp_connect_cb, data);
+    bte_l2cap_new_configured(s_client, &data->device.bdaddr, BTE_L2CAP_PSM_SDP,
+                             NULL, BTE_L2CAP_CONNECT_FLAG_NONE, NULL,
+                             sdp_connect_cb, data);
 }
 
 static void screen_sdp_pop()
@@ -963,34 +857,8 @@ static void screen_sdp_pop()
     DeviceData *data = &s_device_data;
 
     if (data->sdp_handle) {
-        bt_l2cap_handle_close(data->sdp_handle);
+        bte_sdp_client_unref(data->sdp_handle);
         data->sdp_handle = NULL;
-    }
-}
-
-static void print_row_data(char *data, int len)
-{
-    for (int i = 0; i < len; i++) {
-        printf("%02x ", data[i]);
-    }
-
-    /* Print the same as a string */
-    printf(" %.*s\n", len, data);
-}
-
-static void print_data(const void *data, int len)
-{
-    int written = 0;
-    for (int i = 0; i < 20 && written < len; i++) {
-        char input[16];
-        memset(input, 0, sizeof(input));
-        int row_len = len - written;
-        if (row_len > sizeof(input)) {
-            row_len = sizeof(input);
-        }
-        memcpy(input, (const char*)data + written, row_len);
-        print_row_data(input, sizeof(input));
-        written += row_len;
     }
 }
 
@@ -999,9 +867,7 @@ static void screen_sdp_draw()
     const DeviceData *data = &s_device_data;
 
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
-    char bdaddr[20];
-    sprintf_bdaddr(bdaddr, data->device.bdaddr);
-    printf("SDP TO %s - %.64s", bdaddr, data->device.name);
+    printf("SDP TO " BD_ADDR_FMT " - %.64s", BD_ADDR_DATA(&data->device.bdaddr), data->device.name);
 
     printf(CONSOLE_WHITE);
     printf("\x1b[4;0H");
@@ -1015,8 +881,7 @@ static void screen_sdp_draw()
         printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
     } else if (data->conn_status == CONN_STATUS_CONNECTED) {
         printf("Connected.\n");
-        printf("Browsing SDP services... %c (%d resp, cont len=%d)\n", anim_char,
-               data->sdp_num_responses, s_sdp_continuation_len);
+        printf("Browsing SDP services... %c\n", anim_char);
     } else if (data->conn_status == CONN_STATUS_SDP_BROWSE_COMPLETE) {
         printf("Got response, size = %d\n", data->sdp_response_len);
         if (s_sdp_dump_raw) {
@@ -1025,8 +890,14 @@ static void screen_sdp_draw()
         } else {
             sdp_print_attribute_list(data->sdp_response, data->current_row, 19);
         }
+    } else {
+        printf("Wierd status %d\n", data->conn_status);
     }
 
+    if (data->error_msg[0] != 0) {
+        printf(CONSOLE_RESET "\x1b[%d;0H" CONSOLE_RED "%s",
+               s_screen_h - 5, data->error_msg);
+    }
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
     printf("_________________________________\n");
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
@@ -1051,104 +922,60 @@ static void screen_sdp_process_input(u32 buttons, u32 held)
     }
 }
 
-static void sdp_hid_got_message(BtL2capHandle *handle, void *message, size_t len,
-                                void *cb_data)
-{
-    DeviceData *data = cb_data;
-    const uint8_t *msg = message;
-    data->sdp_num_responses++;
-
-    queue_refresh();
-    if (len <= 0) {
-        data->conn_status = CONN_STATUS_NULL_RESPONSE;
-        data->has_pending_call = false;
-        set_animating(false);
-        return;
-    }
-
-    if (msg[0] == SDP_ServiceSearchResponse) {
-        data->conn_status = CONN_STATUS_SDP_HID_SERVICE;
-        if (len >= 9) {
-            data->sdp_num_services = big_endian_read_16(msg, 7);
-        } else {
-            data->sdp_num_services = 0;
-        }
-
-        uint32_t service_id = 0;
-        if (data->sdp_num_services > 0 && len >= 9 + 4) {
-            service_id = big_endian_read_32(msg, 9);
-        }
-        data->sdp_hid_service_id = service_id;
-        data->sdp_response_len = 0;
-        data->sdp_num_responses = 0;
-
-        if (service_id != 0) {
-            uint8_t buffer[256];
-            s_sdp_continuation_len = 0;
-            int len = sdp_build_service_attribute_req(buffer, service_id,
-                                                      BLUETOOTH_ATTRIBUTE_HID_DESCRIPTOR_LIST);
-
-            bt_l2cap_handle_write(handle, buffer, len);
-        } else {
-            copy_response(msg, len, data->sdp_response, &data->sdp_response_len,
-                          sizeof(data->sdp_response));
-            data->has_pending_call = false;
-            set_animating(false);
-        }
-    } else if (msg[0] == SDP_ServiceAttributeResponse) {
-        bool cont = sdp_save_service_attribute(msg, len,
-                                               data->sdp_response, &data->sdp_response_len,
-                                               sizeof(data->sdp_response));
-        if (cont) {
-            uint8_t buffer[256];
-            int len = sdp_build_service_attribute_req(buffer, data->sdp_hid_service_id,
-                                                      BLUETOOTH_ATTRIBUTE_HID_DESCRIPTOR_LIST);
-            bt_l2cap_handle_write(handle, buffer, len);
-        } else {
-            data->has_pending_call = false;
-            data->conn_status = CONN_STATUS_SDP_HID_ATTRIBUTES;
-            set_animating(false);
-        }
-    }
-}
-
-static void sdp_hid_connect_cb(const BtConnectResult *result, void *cb_data)
+static void sdp_hid_connect_cb(BteL2cap *l2cap, const BteL2capNewConfiguredReply *reply, void *cb_data)
 {
     DeviceData *data = cb_data;
 
-    queue_refresh();
-    if (result->error_code == 0) {
+    data->error_code = reply->result;
+    if (data->error_code == 0) {
         data->conn_status = CONN_STATUS_CONNECTED;
     } else {
         data->conn_status = CONN_STATUS_DISCONNECTED;
+        sprintf(data->error_msg, "Connection failed, error %04x", reply->result);
+        set_animating(false);
+        queue_refresh();
+        return;
     }
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
-    BtL2capHandle *handle = data->sdp_handle = result->handle;
+    BteSdpClient *sdp = data->sdp_handle = bte_sdp_client_new(l2cap);
 
-    bt_l2cap_handle_notify(handle, sdp_hid_got_message, data);
+    uint8_t pattern[32];
+    bte_sdp_de_write(pattern, sizeof(pattern),
+                     BTE_SDP_DE_TYPE_SEQUENCE,
+                     BTE_SDP_DE_TYPE_UUID16, BTE_SDP_SRV_CLASS_HDP,
+                     BTE_SDP_DE_END,
+                     BTE_SDP_DE_END);
+    uint8_t id_list[20];
+    bte_sdp_de_write(id_list, sizeof(id_list),
+                     BTE_SDP_DE_TYPE_SEQUENCE,
+                     BTE_SDP_DE_TYPE_UUID16, BTE_SDP_ATTR_ID_HID_DESC_LIST,
+                     BTE_SDP_DE_END,
+                     BTE_SDP_DE_END);
 
-    uint8_t buffer[256];
-    int len = sdp_build_service_search_req(buffer, 0x1124);
-
-    bt_l2cap_handle_write(handle, buffer, len);
+    bool ok = bte_sdp_service_search_attr_req(sdp, pattern, 1000,
+                                              id_list, sdp_service_search_attr_cb, data);
+    if (!ok) {
+        data->conn_status = CONN_STATUS_DISCONNECTED;
+        sprintf(data->error_msg, "Failed to issue SDP request");
+        set_animating(false);
+    }
+    queue_refresh();
 }
 
 static void screen_sdp_hid_reset()
 {
     DeviceData *data = &s_device_data;
 
-    s_sdp_transaction_id = 0;
     data->current_row = 0;
     data->error_code = 0;
+    data->error_msg[0] = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
-    data->sdp_num_responses = false;
     data->sdp_response_len = 0;
     data->has_pending_call = true;
     set_animating(true);
-    bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
-               sdp_hid_connect_cb, data);
+    bte_l2cap_new_configured(s_client, &data->device.bdaddr, BTE_L2CAP_PSM_SDP,
+                             NULL, BTE_L2CAP_CONNECT_FLAG_NONE, NULL,
+                             sdp_hid_connect_cb, data);
 }
 
 static void screen_sdp_hid_pop()
@@ -1161,9 +988,7 @@ static void screen_sdp_hid_draw()
     const DeviceData *data = &s_device_data;
 
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
-    char bdaddr[20];
-    sprintf_bdaddr(bdaddr, data->device.bdaddr);
-    printf("SDP TO %s - %.64s", bdaddr, data->device.name);
+    printf("SDP TO " BD_ADDR_FMT " - %.64s", BD_ADDR_DATA(&data->device.bdaddr), data->device.name);
 
     printf(CONSOLE_WHITE);
     printf("\x1b[4;0H");
@@ -1181,17 +1006,7 @@ static void screen_sdp_hid_draw()
     } else if (data->conn_status == CONN_STATUS_CONNECTED) {
         printf("Connected.\n");
         printf("Getting service ID... %c                  \n", anim_char);
-    } else if (data->conn_status == CONN_STATUS_SDP_HID_SERVICE) {
-        if (data->sdp_hid_service_id != 0) {
-            printf("Got HID service: 0x%x\n", data->sdp_hid_service_id);
-            printf("Getting attributes... %c (%d resp, cont len=%d)      \n", anim_char,
-                   data->sdp_num_responses, s_sdp_continuation_len);
-        } else {
-            printf("Error code = %d, status = %d\n", data->error_code, data->l2cap_status);
-            printf("Failed to get service ID (response length = %d).\n", data->sdp_response_len);
-            print_data(data->sdp_response, data->sdp_response_len);
-        }
-    } else if (data->conn_status == CONN_STATUS_SDP_HID_ATTRIBUTES) {
+    } else if (data->conn_status == CONN_STATUS_SDP_BROWSE_COMPLETE) {
         if (s_sdp_dump_raw) {
             printf("Got response size %d\n", data->sdp_response_len);
             de_dump_data_element(data->sdp_response, data->current_row, 18);
@@ -1203,6 +1018,10 @@ static void screen_sdp_hid_draw()
         printf("Got an empty response\n");
     }
 
+    if (data->error_msg[0] != 0) {
+        printf(CONSOLE_RESET "\x1b[%d;0H" CONSOLE_RED "%s",
+               s_screen_h - 5, data->error_msg);
+    }
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
     printf("_________________________________\n");
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
@@ -1227,36 +1046,58 @@ static void screen_sdp_hid_process_input(u32 buttons, u32 held)
     }
 }
 
-static void hid_connect_intr_cb(const BtConnectResult *result, void *cb_data)
+static void hid_message_cb(BteL2cap *l2cap, BteBufferReader *reader, void *cb_data)
 {
     DeviceData *data = cb_data;
 
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
-    if (result->error_code != 0) {
+    int size = bte_buffer_reader_read(reader, data->sdp_response, sizeof(data->sdp_response));
+    data->sdp_response_len = size;
+    queue_refresh();
+}
+
+static void hid_connect_intr_cb(BteL2cap *l2cap, const BteL2capNewConfiguredReply *reply, void *cb_data)
+{
+    DeviceData *data = cb_data;
+
+    data->error_code = reply->result;
+    if (data->error_code == 0) {
+        data->conn_status = CONN_STATUS_CONNECTED;
+    } else {
         data->conn_status = CONN_STATUS_DISCONNECTED;
         set_animating(false);
+        printf("Cannot connect intr channel: %04x", reply->result);
+        queue_refresh();
         return;
     }
 
-    data->conn_status = CONN_STATUS_CONNECTED;
+    data->hid_intr = bte_l2cap_ref(l2cap);
+    bte_l2cap_set_userdata(l2cap, data);
+
+    bte_l2cap_on_message_received(data->hid_intr, hid_message_cb);
+    bte_l2cap_on_message_received(data->hid_ctrl, hid_message_cb);
+    queue_refresh();
     /* TODO: get some info */
 }
 
-static void hid_connect_ctrl_cb(const BtConnectResult *result, void *cb_data)
+static void hid_connect_ctrl_cb(BteL2cap *l2cap, const BteL2capNewConfiguredReply *reply, void *cb_data)
 {
     DeviceData *data = cb_data;
 
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
-    if (result->error_code != 0) {
+    data->error_code = reply->result;
+    if (data->error_code != 0) {
         data->conn_status = CONN_STATUS_DISCONNECTED;
         set_animating(false);
+        printf("Cannot connect ctrl channel: %04x", reply->result);
+        queue_refresh();
         return;
     }
 
-    bt_connect(data->device.bdaddr, true, BT_PSM_HID_INTR,
-               hid_connect_intr_cb, data);
+    data->hid_ctrl = bte_l2cap_ref(l2cap);
+    bte_l2cap_set_userdata(l2cap, data);
+    bte_l2cap_new_configured(s_client, &data->device.bdaddr, BTE_L2CAP_PSM_HID_INTR,
+                             NULL, BTE_L2CAP_CONNECT_FLAG_NONE, NULL,
+                             hid_connect_intr_cb, data);
+    queue_refresh();
 }
 
 static void screen_hid_reset()
@@ -1264,11 +1105,22 @@ static void screen_hid_reset()
     DeviceData *data = &s_device_data;
 
     data->error_code = 0;
+    data->error_msg[0] = 0;
     data->l2cap_status = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
+    data->sdp_response_len = 0;
+    if (data->hid_ctrl) {
+        bte_l2cap_unref(data->hid_ctrl);
+        data->hid_ctrl = NULL;
+    }
+    if (data->hid_intr) {
+        bte_l2cap_unref(data->hid_intr);
+        data->hid_intr = NULL;
+    }
     set_animating(true);
-    bt_connect(data->device.bdaddr, true, BT_PSM_HID_CONTROL,
-               hid_connect_ctrl_cb, data);
+    bte_l2cap_new_configured(s_client, &data->device.bdaddr, BTE_L2CAP_PSM_HID_CTRL,
+                             NULL, BTE_L2CAP_CONNECT_FLAG_NONE, NULL,
+                             hid_connect_ctrl_cb, data);
 }
 
 static void screen_hid_draw()
@@ -1276,9 +1128,7 @@ static void screen_hid_draw()
     const DeviceData *data = &s_device_data;
 
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
-    char bdaddr[20];
-    sprintf_bdaddr(bdaddr, data->device.bdaddr);
-    printf("HID for %s - %.64s", bdaddr, data->device.name);
+    printf("HID for " BD_ADDR_FMT " - %.64s", BD_ADDR_DATA(&data->device.bdaddr), data->device.name);
 
     printf(CONSOLE_WHITE);
     printf("\x1b[4;0H");
@@ -1289,10 +1139,22 @@ static void screen_hid_draw()
         printf("Connecting... %c\n", anim_char);
     } else {
         printf("%s      \n", data->conn_status == CONN_STATUS_CONNECTED ?
-               "Connecting" : "Connected");
-        printf("Error code = %d, status = %d", data->error_code, data->l2cap_status);
+               "Connected" : "Disconnected");
+        printf("Error code = %d, ctrl = %d, intr = %d", data->error_code, data->hid_ctrl != NULL, data->hid_intr != NULL);
+
+        if (data->sdp_response_len > 0) {
+            printf("Got message (size %d):\n", data->sdp_response_len);
+            int size = data->sdp_response_len;
+            if (size > 32) size = 32;
+            for (int i = 0; i < size; i++)
+                printf(" %02x", data->sdp_response[i]);
+        }
     }
 
+    if (data->error_msg[0] != 0) {
+        printf(CONSOLE_RESET "\x1b[%d;0H" CONSOLE_RED "%s",
+               s_screen_h - 5, data->error_msg);
+    }
     printf(CONSOLE_WHITE CONSOLE_RESET "\x1b[%d;0H", s_screen_h - 4);
     printf("_________________________________\n");
     printf(CONSOLE_WHITE "1 - " CONSOLE_RESET "Back  ");
@@ -1305,61 +1167,58 @@ static void screen_hid_process_input(u32 buttons, u32 held)
     }
 }
 
-static void link_key_request_cb(const BtLinkKeyRequestData *event,
+static bool link_key_request_cb(BteHci *hci,
+                                const BteBdAddr *address,
                                 void *cb_data)
 {
     DeviceData *data = cb_data;
 
     queue_refresh();
+    if (memcmp(address, &data->device.bdaddr, 6) != 0) return false;
+
     data->num_link_key_requests++;
-    bt_link_key_reply(&event->address, NULL);
+    bte_hci_link_key_req_neg_reply(hci, address, NULL, NULL);
+    return true;;
 }
 
-static void link_key_notification_cb(const BtLinkKeyNotificationData *event,
+static bool link_key_notification_cb(BteHci *hci, const BteHciLinkKeyNotificationData *event,
                                      void *cb_data)
 {
     DeviceData *data = cb_data;
 
     queue_refresh();
-    memcpy(data->link_key, event->key, sizeof(data->link_key));
+    if (memcmp(&event->address, &data->device.bdaddr, 6) != 0) return false;
+    memcpy(data->link_key, &event->key, sizeof(data->link_key));
     data->num_link_key_notifications++;
+    return true;
 }
 
-static void pin_code_request_cb(const BtPinCodeRequestData *event,
+static bool pin_code_request_cb(BteHci *hci, const BteBdAddr *address,
                                 void *cb_data)
 {
     DeviceData *data = cb_data;
 
     queue_refresh();
+    if (memcmp(address, &data->device.bdaddr, 6) != 0) return false;
     data->num_pin_code_requests++;
-    bt_pin_code_reply(&event->address, NULL);
+    bte_hci_pin_code_req_neg_reply(hci, address, NULL, NULL);
+    return true;
 }
 
-static void authentication_complete_cb(const BtAuthenticationCompleteData *event,
-                                       void *cb_data)
-{
-    DeviceData *data = cb_data;
-
-    queue_refresh();
-    data->num_authentication_completes++;
-}
-
-static void pair_connect_cb(const BtConnectResult *result, void *cb_data)
+static void pair_connect_cb(BteHci *hci, const BteHciCreateConnectionReply *reply, void *cb_data)
 {
     DeviceData *data = cb_data;
 
     queue_refresh();
 
-    data->error_code = result->error_code;
-    data->l2cap_status = result->status;
-    if (result->error_code == 0) {
+    data->error_code = reply->status;
+    if (data->error_code == 0) {
         data->conn_status = CONN_STATUS_CONNECTED;
     } else {
         data->conn_status = CONN_STATUS_DISCONNECTED;
         set_animating(false);
         return;
     }
-    data->sdp_handle = result->handle;
     //bt_request_authentication((BtAddress*)data->device.bdaddr);
 }
 
@@ -1375,13 +1234,13 @@ static void screen_pair_reset()
     data->num_authentication_completes = 0;
     data->conn_status = CONN_STATUS_CONNECTING;
     set_animating(true);
-    bt_on_link_key_request(link_key_request_cb, data);
-    bt_on_link_key_notification(link_key_notification_cb, data);
-    bt_on_pin_code_request(pin_code_request_cb, data);
-    bt_on_authentication_complete(authentication_complete_cb, data);
+    BteHci *hci = bte_hci_get(s_client);
+    bte_hci_on_link_key_request(hci, link_key_request_cb);
+    bte_hci_on_link_key_notification(hci, link_key_notification_cb);
+    bte_hci_on_pin_code_request(hci, pin_code_request_cb);
 
-    bt_connect(data->device.bdaddr, true, BT_PSM_SDP,
-               pair_connect_cb, data);
+    bte_hci_create_connection(hci, &data->device.bdaddr, NULL,
+                              NULL, pair_connect_cb, data);
 }
 
 static void screen_pair_draw()
@@ -1389,9 +1248,7 @@ static void screen_pair_draw()
     const DeviceData *data = &s_device_data;
 
     printf(CONSOLE_RESET "\x1b[2;0H" CONSOLE_YELLOW);
-    char bdaddr[20];
-    sprintf_bdaddr(bdaddr, data->device.bdaddr);
-    printf("HID for %s - %.64s", bdaddr, data->device.name);
+    printf("Pairing to " BD_ADDR_FMT " - %.64s", BD_ADDR_DATA(&data->device.bdaddr), data->device.name);
 
     printf(CONSOLE_WHITE);
     printf("\x1b[4;0H");
@@ -1495,6 +1352,11 @@ static const ScreenMethods *current_screen()
     return &s_screens[current_screen_id()];
 }
 
+void hci_initialized_cb(BteHci *hci, bool success, void *userdata)
+{
+    s_hci_initialized = true;
+}
+
 int main(int argc, char **argv) {
 
     VIDEO_Init();
@@ -1515,6 +1377,10 @@ int main(int argc, char **argv) {
     CON_InitEx(rmode, 0, 0, rmode->fbWidth,rmode->xfbHeight);
     CON_GetMetrics(&s_screen_w, &s_screen_h);
 
+    SYS_STDIO_Report(false);
+    s_client = bte_client_new();
+    bte_hci_on_initialized(bte_hci_get(s_client), hci_initialized_cb, NULL);
+
     int frames_since_last_refresh = 0;
     while (!s_quit_requested) {
         WPAD_ScanPads();
@@ -1533,7 +1399,7 @@ int main(int argc, char **argv) {
             consoleClear();
             screen->draw();
         }
-        if (screen->process_input) screen->process_input(pressed, held);
+        if (s_hci_initialized && screen->process_input) screen->process_input(pressed, held);
 
         VIDEO_WaitVSync();
         frames_since_last_refresh++;
